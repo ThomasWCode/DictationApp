@@ -67,16 +67,27 @@ public sealed class JsonSettingsStore : ISettingsStore
         await SaveAsync(copy, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Schema 1 files carried AssemblyAI LLM Gateway model IDs; cleanup now runs on Groq.</summary>
-    private AppSettings Migrate(AppSettings settings)
+    /// <summary>
+    /// Schema 1 files carried AssemblyAI LLM Gateway model IDs and a boolean <c>ShowFlowBar</c>; cleanup now
+    /// runs on Groq and the overlay has three modes. Legacy members no longer exist on <see cref="AppSettings"/>,
+    /// so they are read from the raw JSON before the typed object is trusted.
+    /// </summary>
+    private AppSettings Migrate(AppSettings settings, JsonElement raw)
     {
         if (settings.SchemaVersion < 2)
         {
             settings.LlmBaseUrl = AppSettings.DefaultLlmBaseUrl;
             settings.LlmModel = AppSettings.DefaultLlmModel;
             settings.LlmFallbackModels = new AppSettings().LlmFallbackModels;
+            if (raw.ValueKind == JsonValueKind.Object
+                && raw.TryGetProperty("ShowFlowBar", out var showFlowBar)
+                && showFlowBar.ValueKind == JsonValueKind.False)
+            {
+                settings.FlowBarMode = FlowBarMode.Hidden;
+            }
+
             settings.SchemaVersion = 2;
-            _logger.LogInformation("Migrated settings to schema v2 (Groq cleanup models)");
+            _logger.LogInformation("Migrated settings to schema v2 (Groq cleanup models, Flow bar mode {Mode})", settings.FlowBarMode);
         }
 
         return settings;
@@ -98,7 +109,8 @@ public sealed class JsonSettingsStore : ISettingsStore
                 throw new JsonException("settings.json deserialised to null");
             }
 
-            return Migrate(settings);
+            using var raw = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+            return Migrate(settings, raw.RootElement);
         }
         catch (Exception ex) when (ex is JsonException or IOException)
         {

@@ -222,7 +222,7 @@ public sealed class JsonSettingsStoreTests : IDisposable
     {
         Directory.CreateDirectory(_migrationDir);
         var path = Path.Combine(_migrationDir, "settings.json");
-        await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 1, \"LlmModel\": \"gemini-2.5-flash-lite\", \"LlmFallbackModels\": [\"gemini-2.5-flash\"], \"ShowFlowBar\": false, \"HotkeyMode\": \"Hold\" }");
+        await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 1, \"LlmModel\": \"gemini-2.5-flash-lite\", \"LlmFallbackModels\": [\"gemini-2.5-flash\"], \"HotkeyMode\": \"Hold\" }");
         var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
 
         Assert.Equal(2, store.Current.SchemaVersion);
@@ -230,7 +230,34 @@ public sealed class JsonSettingsStoreTests : IDisposable
         Assert.Equal(AppSettings.DefaultLlmBaseUrl, store.Current.LlmBaseUrl);
         Assert.Equal("openai/gpt-oss-120b", store.Current.LlmModel);
         Assert.Contains("qwen/qwen3.8-27b", store.Current.LlmFallbackModels);
-        Assert.Equal(FlowBarMode.Full, store.Current.FlowBarMode); // unknown old members are ignored
+        Assert.Equal(FlowBarMode.Full, store.Current.FlowBarMode);
+        Directory.Delete(_migrationDir, recursive: true);
+    }
+
+    [Theory]
+    [InlineData("\"ShowFlowBar\": false", FlowBarMode.Hidden)]
+    [InlineData("\"ShowFlowBar\": true", FlowBarMode.Full)]
+    public async Task Schema_v1_show_flow_bar_maps_to_flow_bar_mode(string legacy, FlowBarMode expected)
+    {
+        Directory.CreateDirectory(_migrationDir);
+        var path = Path.Combine(_migrationDir, "settings.json");
+        await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 1, " + legacy + " }");
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+
+        Assert.Equal(expected, store.Current.FlowBarMode);
+        Directory.Delete(_migrationDir, recursive: true);
+    }
+
+    [Fact]
+    public async Task Schema_v2_settings_are_not_migrated_again()
+    {
+        Directory.CreateDirectory(_migrationDir);
+        var path = Path.Combine(_migrationDir, "settings.json");
+        await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 2, \"LlmModel\": \"custom/model\", \"FlowBarMode\": \"Minimal\", \"ShowFlowBar\": false }");
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+
+        Assert.Equal("custom/model", store.Current.LlmModel);
+        Assert.Equal(FlowBarMode.Minimal, store.Current.FlowBarMode);
         Directory.Delete(_migrationDir, recursive: true);
     }
 
