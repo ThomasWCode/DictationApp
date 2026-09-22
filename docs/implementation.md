@@ -196,10 +196,24 @@ build/make_icon.py, build/app.ico, build/pack.ps1
 
 ```powershell
 dotnet test DictationApp.sln
+dotnet run --project src/DictationApp -- --smoke                           # tray + every window constructed, exit 0
 dotnet run --project src/DictationApp -- --stream-test sample.wav          # real streaming session
 dotnet run --project src/DictationApp -- --simulate sample.wav --delay 5   # full pipeline into the focused window
 dotnet run --project src/DictationApp                                      # tray app
 ```
 
-Note: on a locked session (`LogonUI` running) `OpenClipboard` fails for every process and there is no
-foreground window, so `--simulate` ends in a Failed record with a clipboard error; run it on an unlocked desktop.
+What was verified during the build, in this order:
+
+1. `dotnet test`: 143 tests green.
+2. `--stream-test`: a real session with four turns, ~960 ms connect latency, 890 ms handshake, exact text.
+3. `--simulate` on a **locked** session: streaming, cleanup fallback and history worked; the clipboard step
+   failed because `OpenClipboard` is refused for every process while `LogonUI` is active. That exercised the
+   failure path (Failed record with the WAV kept, toast).
+4. `--smoke`: tray icon plus all five windows constructed without error.
+5. `--simulate` on the **unlocked** desktop with no text box focused: "No text box has focus, text copied"
+   toast, record `CopiedOnly`, clipboard held the text.
+6. `--simulate` with a Notepad document focused: UIA reported `Document`, the text was pasted, the record was
+   `Inserted`, and the clipboard was restored to its previous value afterwards.
+
+Caution when running `--simulate` yourself: it pastes into whatever window is in the foreground when the
+delay expires, exactly like a real dictation. Focus a scratch document, not something you care about.
