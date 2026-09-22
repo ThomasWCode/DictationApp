@@ -27,15 +27,15 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<IHistoryRepository>(sp => new SqliteHistoryRepository(paths.HistoryDb, sp.GetRequiredService<ILogger<SqliteHistoryRepository>>()));
         services.TryAddSingleton<IStreamingTranscriberFactory, StreamingTranscriberFactory>();
         services.TryAddSingleton<PassthroughPostProcessor>();
-        services.TryAddSingleton<LlmGatewayPostProcessor>();
+        services.TryAddSingleton<LlmPostProcessor>();
         services.TryAddSingleton<ITextPostProcessor, PostProcessorRouter>();
         services.TryAddSingleton<DictationStatusHub>();
         services.TryAddSingleton<InsertionTextFormatter>();
         services.TryAddSingleton<DictationOrchestrator>();
         services.AddHostedService(sp => sp.GetRequiredService<DictationOrchestrator>());
-        services.AddHttpClient(LlmGatewayPostProcessor.HttpClientName, client =>
+        services.AddHttpClient(LlmPostProcessor.HttpClientName, client =>
         {
-            client.BaseAddress = LlmGatewayPostProcessor.DefaultBaseAddress;
+            client.BaseAddress = LlmPostProcessor.DefaultBaseAddress;
             client.Timeout = TimeSpan.FromSeconds(30);
         });
         return services;

@@ -29,6 +29,10 @@ public partial class SettingsWindow : Window
 
     private void ApiKeyBox_OnPasswordChanged(object sender, RoutedEventArgs e) => _viewModel.ApiKey = ApiKeyBox.Password;
 
+    private void GroqKeyBox_OnPasswordChanged(object sender, RoutedEventArgs e) => _viewModel.GroqApiKey = GroqKeyBox.Password;
+
+    private void GitHubTokenBox_OnPasswordChanged(object sender, RoutedEventArgs e) => _viewModel.GitHubToken = GitHubTokenBox.Password;
+
     /// <summary>
     /// Chord recorder: keys held together are collected until the last one is released, then the chord is
     /// written as text. Typing the name by hand still works because the TextBox stays editable.

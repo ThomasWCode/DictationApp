@@ -10,7 +10,7 @@ using NSubstitute;
 
 namespace DictationApp.Core.Tests;
 
-public class LlmGatewayPostProcessorTests
+public class LlmPostProcessorTests
 {
     private static readonly PostProcessRequest Request = new(CleanupLevel.Light, Tone.Neutral, ["LSHTM"], "notepad", null, null);
 
@@ -18,14 +18,14 @@ public class LlmGatewayPostProcessorTests
 
     private sealed class ScriptedHandler(Script script) : HttpMessageHandler
     {
-        public List<(string Model, string Body)> Calls { get; } = [];
+        public List<(string Model, string Body, string? Auth, Uri? Url)> Calls { get; } = [];
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(body);
             var model = doc.RootElement.GetProperty("model").GetString() ?? string.Empty;
-            Calls.Add((model, body));
+            Calls.Add((model, body, request.Headers.Authorization?.ToString(), request.RequestUri));
             return await script(request, Calls.Count, cancellationToken);
         }
     }
@@ -35,48 +35,63 @@ public class LlmGatewayPostProcessorTests
         {
             Content = new StringContent(JsonSerializer.Serialize(new
             {
-                choices = new[] { new { message = new { role = "assistant", content } } },
+                choices = new[] { new { message = new { role = "assistant", content, reasoning = "thinking…" } } },
                 usage = new { prompt_tokens = prompt, completion_tokens = completion },
             }), Encoding.UTF8, "application/json"),
         };
 
-    private static (LlmGatewayPostProcessor Processor, ScriptedHandler Handler, FakeTimeProvider Clock) Create(
+    private static (LlmPostProcessor Processor, ScriptedHandler Handler, FakeTimeProvider Clock) Create(
         Script script,
-        string? apiKey = "key",
-        string model = "gemini-2.5-flash-lite",
+        string? apiKey = "gsk_test",
+        string model = "qwen/qwen3.8-27b",
+        string? baseUrl = null,
         params string[] fallbacks)
     {
         var handler = new ScriptedHandler(script);
         var factory = Substitute.For<IHttpClientFactory>();
-        factory.CreateClient(Arg.Any<string>()).Returns(_ => new HttpClient(handler, disposeHandler: false) { BaseAddress = LlmGatewayPostProcessor.DefaultBaseAddress });
+        factory.CreateClient(Arg.Any<string>()).Returns(_ => new HttpClient(handler, disposeHandler: false));
         var keys = Substitute.For<IApiKeyProvider>();
-        keys.GetApiKey().Returns(apiKey);
+        keys.GetLlmApiKey().Returns(apiKey);
+        keys.GetApiKey().Returns("assemblyai-key-unused-here");
         var settings = Substitute.For<ISettingsStore>();
-        settings.Current.Returns(new AppSettings { LlmModel = model, LlmFallbackModels = [.. fallbacks] });
+        settings.Current.Returns(new AppSettings { LlmModel = model, LlmFallbackModels = [.. fallbacks], LlmBaseUrl = baseUrl ?? AppSettings.DefaultLlmBaseUrl });
         var clock = new FakeTimeProvider();
-        return (new LlmGatewayPostProcessor(factory, keys, settings, NullLogger<LlmGatewayPostProcessor>.Instance, clock), handler, clock);
+        return (new LlmPostProcessor(factory, keys, settings, NullLogger<LlmPostProcessor>.Instance, clock), handler, clock);
     }
 
     [Fact]
-    public async Task Returns_cleaned_text_from_first_model()
+    public async Task Calls_groq_with_bearer_key_and_returns_cleaned_text()
     {
         var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("I think we should ship on Tuesday.")));
         var result = await p.ProcessAsync("um I think we should ship on tuesday", Request, CancellationToken.None);
 
         Assert.True(result.Applied);
         Assert.Equal("I think we should ship on Tuesday.", result.Text);
-        Assert.Equal("gemini-2.5-flash-lite", result.Model);
+        Assert.Equal("qwen/qwen3.8-27b", result.Model);
         Assert.Equal(100, result.PromptTokens);
-        Assert.Single(handler.Calls);
-        Assert.Contains("\"temperature\":0.1", handler.Calls[0].Body);
-        Assert.Contains("LSHTM", handler.Calls[0].Body);
+        var call = Assert.Single(handler.Calls);
+        Assert.Equal("Bearer gsk_test", call.Auth);
+        Assert.Equal("https://api.groq.com/openai/v1/chat/completions", call.Url!.ToString());
+        Assert.Contains("\"temperature\":0.1", call.Body);
+        Assert.Contains("LSHTM", call.Body);
+        Assert.DoesNotContain("reasoning_effort", call.Body); // qwen: no reasoning parameter
     }
 
     [Fact]
-    public async Task Falls_back_through_the_chain_on_http_errors()
+    public async Task Reasoning_models_are_asked_for_low_effort()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Clean text here now.")), model: "openai/gpt-oss-120b");
+        await p.ProcessAsync("some raw text here now", Request, CancellationToken.None);
+        Assert.Contains("\"reasoning_effort\":\"low\"", handler.Calls[0].Body);
+        Assert.Equal("low", LlmPostProcessor.ReasoningEffortFor("openai/gpt-oss-20b"));
+        Assert.Null(LlmPostProcessor.ReasoningEffortFor("qwen/qwen3.8-27b"));
+    }
+
+    [Fact]
+    public async Task Rate_limit_moves_to_the_next_free_model()
     {
         var (p, handler, _) = Create(
-            (_, n, _) => Task.FromResult(n < 3 ? new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{\"message\":\"no access\"}") } : Ok("Clean text here now.")),
+            (_, n, _) => Task.FromResult(n < 3 ? new HttpResponseMessage((HttpStatusCode)429) { Content = new StringContent("{\"error\":{\"message\":\"Rate limit reached\"}}") } : Ok("Clean text here now.")),
             model: "a",
             fallbacks: ["b", "c"]);
         var result = await p.ProcessAsync("some raw text here now", Request, CancellationToken.None);
@@ -121,14 +136,22 @@ public class LlmGatewayPostProcessorTests
     }
 
     [Fact]
-    public async Task Missing_api_key_short_circuits()
+    public async Task Missing_groq_key_short_circuits()
     {
         var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("x")), apiKey: null);
         var result = await p.ProcessAsync("text", Request, CancellationToken.None);
 
         Assert.False(result.Applied);
-        Assert.Equal("no-api-key", result.FailureReason);
+        Assert.Equal("no-llm-key", result.FailureReason);
         Assert.Empty(handler.Calls);
+    }
+
+    [Fact]
+    public async Task Custom_base_url_is_honoured()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Clean text here now.")), baseUrl: "https://example.test/v1");
+        await p.ProcessAsync("some raw text here now", Request, CancellationToken.None);
+        Assert.Equal("https://example.test/v1/chat/completions", handler.Calls[0].Url!.ToString());
     }
 
     [Fact]
@@ -139,7 +162,6 @@ public class LlmGatewayPostProcessorTests
             {
                 if (n == 1)
                 {
-                    // Hang until the per-attempt timer (driven by the fake clock) cancels the request.
                     await Task.Delay(Timeout.InfiniteTimeSpan, ct);
                 }
 
@@ -150,7 +172,7 @@ public class LlmGatewayPostProcessorTests
 
         var task = p.ProcessAsync("second model answered with text", Request, CancellationToken.None);
         await Task.Delay(100);
-        clock.Advance(LlmGatewayPostProcessor.PerAttemptTimeout + TimeSpan.FromMilliseconds(10));
+        clock.Advance(LlmPostProcessor.PerAttemptTimeout + TimeSpan.FromMilliseconds(10));
         var result = await task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.True(result.Applied);
@@ -174,7 +196,7 @@ public class LlmGatewayPostProcessorTests
         for (var i = 0; i < 3; i++)
         {
             await Task.Delay(100);
-            clock.Advance(LlmGatewayPostProcessor.PerAttemptTimeout + TimeSpan.FromMilliseconds(10));
+            clock.Advance(LlmPostProcessor.PerAttemptTimeout + TimeSpan.FromMilliseconds(10));
         }
 
         var result = await task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -185,9 +207,9 @@ public class LlmGatewayPostProcessorTests
     [Fact]
     public void Max_tokens_is_clamped()
     {
-        Assert.Equal(200, LlmGatewayPostProcessor.MaxTokensFor("hi"));
-        Assert.Equal(4000, LlmGatewayPostProcessor.MaxTokensFor(new string('x', 40_000)));
-        Assert.Equal(2 * 100 + 100, LlmGatewayPostProcessor.MaxTokensFor(new string('x', 400)));
+        Assert.Equal(200, LlmPostProcessor.MaxTokensFor("hi"));
+        Assert.Equal(4000, LlmPostProcessor.MaxTokensFor(new string('x', 40_000)));
+        Assert.Equal(2 * 100 + 100, LlmPostProcessor.MaxTokensFor(new string('x', 400)));
     }
 
     [Fact]

@@ -20,6 +20,8 @@ public partial class FirstRunWindow : Window
 
     private void KeyBox_OnPasswordChanged(object sender, RoutedEventArgs e) => _viewModel.ApiKey = KeyBox.Password;
 
+    private void GroqKeyBox_OnPasswordChanged(object sender, RoutedEventArgs e) => _viewModel.GroqApiKey = GroqKeyBox.Password;
+
     private async void Skip_OnClick(object sender, RoutedEventArgs e)
     {
         await _settings.UpdateAsync(s => s.FirstRunCompleted = true);

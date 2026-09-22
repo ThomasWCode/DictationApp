@@ -56,7 +56,6 @@ public static class HostFactory
             builder.Services.AddTransient<FirstRunWindow>();
             builder.Services.AddTransient<CorrectionViewModel>();
             builder.Services.AddTransient<CorrectionWindow>();
-            builder.Services.AddSingleton<UpdateCheckService>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<UpdateCheckService>());
             builder.Services.AddHostedService<HistoryRetentionService>();
         }
@@ -64,6 +63,9 @@ public static class HostFactory
         {
             builder.Services.AddSingleton<INotifier, ConsoleNotifier>();
         }
+
+        // Available in both modes: the tray uses it as a hosted service, --check-updates calls it directly.
+        builder.Services.AddSingleton<UpdateCheckService>();
 
         return builder.Build();
     }

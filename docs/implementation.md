@@ -93,11 +93,15 @@ build/make_icon.py, build/app.ico, build/pack.ps1
 
 - `PromptBuilder` is a string template of the plan's prompt with the level and tone instructions and one
   few-shot pair per level.
-- `LlmGatewayPostProcessor` posts to `https://llm-gateway.assemblyai.com/v1/chat/completions` through
-  `IHttpClientFactory`. Budgets are enforced with linked `CancellationTokenSource`s cancelled by
+- `LlmPostProcessor` posts to an OpenAI-compatible `chat/completions` endpoint, Groq's
+  `https://api.groq.com/openai/v1/` by default (`LlmBaseUrl` setting), with `Authorization: Bearer <Groq key>`
+  through `IHttpClientFactory`. Budgets are enforced with linked `CancellationTokenSource`s cancelled by
   `TimeProvider.CreateTimer`, so the tests drive both the per-attempt and total timeouts with a
-  `FakeTimeProvider`. A 401/403 aborts the chain (a bad key will not get better with another model); 4xx/5xx,
-  timeouts and invalid output move to the next model.
+  `FakeTimeProvider`. A 401/403 aborts the chain (a bad key will not get better with another model); 429 rate
+  limits, other 4xx/5xx, timeouts and invalid output move to the next model. Models whose name contains
+  `gpt-oss` are sent `reasoning_effort: "low"`; the response's `reasoning` field is ignored and only
+  `message.content` is used. (Version 0.1.0 used the AssemblyAI LLM Gateway; the user's account has no access
+  to it, so 0.2.0 moved cleanup to Groq's free tier and settings files are migrated to the new model IDs.)
 - `OutputValidator.Strip` removes code fences and surrounding quotes; `Validate` applies the banned-prefix and
   length-ratio rules (skipped for inputs under 20 characters where ratios are meaningless).
 - `PostProcessorRouter` sends None+Neutral to `PassthroughPostProcessor` (regex normaliser only, no network).
@@ -138,7 +142,11 @@ build/make_icon.py, build/app.ico, build/pack.ps1
 - **HotkeyService** keeps the set of physically held keys (injected events are ignored unless the debug switch
   is on). The chord fires when all chord keys and only chord keys are down and no other key was pressed while
   a modifier was held. Firing a Win chord injects VK 0xE8 down/up through `SendInput`. While the chord is
-  active, Escape/arrows raise events and every other key is swallowed. Handlers are queued on a single-consumer
+  physically held, Escape/arrows raise events and every other key is swallowed. A release under 300 ms is a
+  tap: a lone tap raises ChordUp (the orchestrator cancels the short press); a second tap within 400 ms of the
+  first tap's release suppresses its ChordUp and marks the dictation hands-free, and any later chord press
+  raises ChordUp to stop it (that press's own release is ignored). Hands-free, only Escape is intercepted. The
+  clock is injectable so the tests simulate holds and tap gaps. Handlers are queued on a single-consumer
   channel so their order is preserved and the hook thread never blocks.
 - **Audio**: `WasapiCapture` in shared mode with 20 ms buffers delivers the device mix format;
   `Pcm16Pipeline` runs `BufferedWaveProvider → mono mix → WdlResampler(16 kHz) → PCM16` and slices 3200-byte
@@ -217,3 +225,25 @@ What was verified during the build, in this order:
 
 Caution when running `--simulate` yourself: it pastes into whatever window is in the foreground when the
 delay expires, exactly like a real dictation. Focus a scratch document, not something you care about.
+
+## Update walk-through (0.1.0 → 0.2.0)
+
+How an update actually flows, as exercised on 2026-09-22:
+
+1. `v0.2.0` was tagged; the release workflow packed `DictationApp-win-Setup.exe`, the full `.nupkg` and the
+   `releases.win.json` feed and attached them to the GitHub Release.
+2. The installed 0.1.0 cannot read a private repository (it predates the token setting), so a build of this
+   same code versioned 0.1.9 was installed over it with `Setup.exe --silent`. The install-over kept
+   `settings.json` byte-identical.
+3. That 0.1.9 was run headlessly: `DictationApp.exe --check-updates --github-token <token> --apply-update`.
+   Velopack read the feed, found 0.2.0, downloaded the package into `%LOCALAPPDATA%\DictationApp\packages`,
+   and `ApplyUpdatesAndRestart` swapped `%LOCALAPPDATA%\DictationApp\current` and relaunched the app.
+4. The relaunched app logged version 0.2.0, re-registered its Run key, and read the same
+   `%LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json` (same SHA-256 as before): settings survive because
+   they are not in Velopack's folder. Its first automatic check 45 s later failed with a 404 because no GitHub
+   token was stored in Settings yet; that is the reminder to add one while the repository is private.
+
+Anyone still on 0.1.0 installs 0.2.0 once by running its `Setup.exe`; from then on the updater works.
+
+In the tray the same path is: "Check for updates…" (or the daily check) → toast "Version x downloaded" →
+"Restart to update to x" in the menu, or just quit/reboot and the next start is the new version.

@@ -9,14 +9,14 @@ updates, Open logs folder, Quit). Double-clicking the tray icon opens History.
 | Feature | Behaviour |
 |---|---|
 | Hold-to-talk | Hold the chord (default **Ctrl+Win**), speak, release. Audio is captured from the instant the chord goes down, before the server connection exists, so nothing is lost to connect latency. |
-| Double-tap toggle | Optional mode: tap the chord twice within 400 ms to start, tap once to stop. |
-| Short tap | A press shorter than 300 ms is cancelled before the streaming session begins, so it costs nothing. |
+| Double-tap for hands-free | Tap the chord twice within 400 ms and the dictation keeps running with nothing held; press the chord once to stop. Both ways work all the time, no mode to choose. In hands-free mode only Escape is intercepted (discard); the keyboard otherwise behaves normally, so tone and level are changed with the Flow bar chips. |
+| Short tap | A lone press shorter than 300 ms is cancelled before the streaming session begins, so it costs nothing. |
 | Start menu stays closed | When a chord containing Win fires, an unassigned virtual key (0xE8) is injected so Windows treats the Win press as part of a combination. Win alone still opens Start; Win+E, Win+D and friends work normally. |
 | Escape | Discards the current dictation: nothing is inserted or stored. |
 | Arrow keys while holding | ←/→ cycle the tone (Neutral → Formal → Casual), ↑/↓ cycle the cleanup level. While the chord is held every other key is swallowed so Win+Ctrl+Left cannot switch virtual desktops mid-sentence. |
 | Remembered style | A tone or level change (arrow keys or chips) is remembered for next time: if an app rule applied, that rule is updated (change it in Teams, Teams remembers); otherwise it becomes the new default. Settings › Style › "Remember tone and cleanup changes" turns this off, making changes apply to one dictation only. |
 | 20-minute cap | A dictation is finalised automatically after 20 minutes (configurable 1–180). AssemblyAI bills per session second and caps sessions at 3 h. |
-| Flow bar | A dark pill at the bottom centre of the target window's monitor, never focusable (WS_EX_NOACTIVATE). Shows a pulsing dot while recording, the state (Listening, Finishing, Cleaning up, Inserting), a level meter, the live transcript, and tone/level chips that can be clicked with the mouse. It lingers for 1.8 s after a dictation to show "Nothing heard", "Discarded", "cleanup skipped" or "Failed". |
+| Flow bar | A dark pill at the bottom centre of the target window's monitor, never focusable (WS_EX_NOACTIVATE). Three modes (Settings › General): **Full** shows a pulsing dot while recording, the state (Listening, Finishing, Cleaning up, Inserting), a level meter, the live transcript, and tone/level chips that can be clicked with the mouse, and lingers for 1.8 s after a dictation to show "Nothing heard", "Discarded", "cleanup skipped" or "Failed". **Minimal** is a 132×16 px pill containing only the microphone level, red while listening and breathing blue while the text is finished and inserted, gone as soon as the dictation ends. **Hidden** shows nothing. |
 | Chord pressed again while busy | Ignored; the bar flashes. |
 
 ## Where the text goes
@@ -37,8 +37,10 @@ non-editable control is harmless and the text stays on the clipboard.
 
 ## Cleanup and tone
 
-The raw transcript is passed once through the AssemblyAI LLM Gateway with a system prompt that forbids adding
-content, answering questions or wrapping in quotes, and describes the spoken formatting commands.
+The raw transcript is passed once through Groq's OpenAI-compatible chat API (free tier is enough) with a system
+prompt that forbids adding content, answering questions or wrapping in quotes, and describes the spoken
+formatting commands. AssemblyAI is used for transcription only. Without a Groq key the raw transcript is
+inserted.
 
 | Cleanup level | What it does |
 |---|---|
@@ -64,11 +66,13 @@ unavailable) handles the unambiguous forms itself: "1." / "1)" / "1:" markers an
 "point one", "item one" (words or digits), provided at least two markers run 1, 2, 3… in order. Trailing
 "and" / "then" before the next item is dropped. "Version 1.2" and "my number one priority" stay as prose.
 
-Safety net: the gateway is given 4 s per model and 8 s in total across the fallback chain
-(`gemini-2.5-flash-lite` → `gemini-2.5-flash` → `claude-haiku-4-5-20251001` by default, editable). Output is
-rejected if it is empty, starts with "Here is"/"Sure"/similar, or is more than 2.5× / less than 0.4× the
-input length. On any failure the raw transcript (with regex-applied commands) is inserted and the Flow bar
-shows **cleanup skipped**. "Undo AI edit" in History puts the raw transcript on the clipboard.
+Safety net: each model gets 4 s and the whole chain 8 s. The default chain is `openai/gpt-oss-120b` →
+`qwen/qwen3.8-27b` → `openai/gpt-oss-20b`, all on Groq's free tier (about 1000 requests per day and 8000
+tokens per minute per model; a 429 rate limit simply moves to the next model). The gpt-oss models are asked
+for low reasoning effort so they answer in under a second instead of thinking through their token budget. Output is rejected if it is empty, starts with "Here is"/"Sure"/similar, or is more than 2.5× / less
+than 0.4× the input length. On any failure the raw transcript (with regex-applied commands) is inserted and
+the Flow bar shows **cleanup skipped**. "Undo AI edit" in History puts the raw transcript on the clipboard.
+The endpoint and models are editable, so any OpenAI-compatible service can replace Groq.
 
 ## App-aware rules
 
@@ -115,32 +119,40 @@ service purges at startup and hourly and also sweeps orphaned WAVs. "Store audio
 
 ## Settings
 
-Tabs: **General** (Flow bar, autostart, update check, dictation cap, language codes), **API** (DPAPI-encrypted
-key, "Test key" reports streaming and LLM-gateway access separately, speech model, cleanup model and
-fallbacks), **Hotkey** (chord recorder, Hold vs double-tap, accept injected keys), **Audio** (device picker with
-live meter), **Style** (default tone and level, remember changes), **Dictionary**, **App rules**, **History & privacy**.
+Tabs: **General** (Flow bar mode, autostart, update check, GitHub token for updates, dictation cap, language
+codes), **API** (DPAPI-encrypted AssemblyAI and Groq keys, "Test keys" reports each separately, speech model,
+cleanup endpoint, model and fallbacks), **Hotkey** (chord recorder, accept injected keys), **Audio** (device
+picker with live meter), **Style** (default tone and level, remember changes), **Dictionary**, **App rules**,
+**History & privacy**.
 
 ## First run, autostart, updates
 
-- A three-step wizard (API key with test, microphone meter, hotkey test with a Ctrl+Alt alternative) runs on
-  first start or when no key is configured.
+- A three-step wizard (AssemblyAI and Groq keys with test, microphone meter, hotkey test with a Ctrl+Alt
+  alternative) runs on first start or when no AssemblyAI key is configured.
 - Autostart is on by default. An installed build re-registers the per-user Run key (launching
   `DictationApp.exe --minimized`) every time it starts, so after installing once the app is simply there in the
   tray after every sign-in; no terminal, no shortcut. Development builds only register when the Settings
   checkbox is saved.
-- When installed through the Velopack `Setup.exe`, updates are checked daily against GitHub Releases,
-  downloaded in the background and applied on the next restart; the tray menu can check on demand.
+- Updates (installed builds only): the app checks GitHub Releases 45 s after start and then daily, and the
+  tray menu's "Check for updates…" checks on demand. A newer release is downloaded straight away (a toast says
+  so) and a "Restart to update to x.y.z" entry appears in the tray menu. Choose it to apply immediately, or do
+  nothing: the update is applied when the app next exits, so the next launch, including the autostart at
+  sign-in, is the new version. Only the program folder is replaced; settings, history, audio and the encrypted
+  keys live in `%LOCALAPPDATA%\ThomasWCode\DictationApp` and survive every update and reinstall. While the
+  GitHub repository is private the updater needs a GitHub token (Settings › General) to read the releases.
 
 ## Privacy and cost
 
-Audio goes to AssemblyAI for transcription and the transcript to the LLM Gateway for cleanup; nothing else
-leaves the machine. The API key is DPAPI-protected for the current user. History shows an estimate per
-dictation (streaming at $0.45/h for Universal-3.5 Pro or $0.15/h for the standard model, plus LLM tokens at
-provider prices). No connection is kept warm while idle because sessions are billed per second.
+Audio goes to AssemblyAI for transcription and the transcript to Groq for cleanup; nothing else leaves the
+machine. Both keys (and the optional GitHub token) are DPAPI-protected for the current user. History shows an
+estimate per dictation (streaming at $0.45/h for Universal-3.5 Pro or $0.15/h for the standard model; Groq's
+free tier costs nothing). No connection is kept warm while idle because sessions are billed per second.
 
 ## Diagnostics
 
 - Logs: `%LOCALAPPDATA%\ThomasWCode\DictationApp\logs\dictation-YYYYMMDD.log` (14 days).
 - `DictationApp.exe --stream-test file.wav` streams a WAV through a real session and prints every turn.
 - `DictationApp.exe --simulate file.wav --delay 5` runs a full dictation with the WAV in place of the microphone.
+- `DictationApp.exe --check-updates [--github-token T] [--apply-update]` runs the updater headlessly and
+  prints the outcome (exit 0 up to date, 10 update downloaded, 1 error).
 - Toasts link to `ms-settings:privacy-microphone` when the microphone is blocked or silent.

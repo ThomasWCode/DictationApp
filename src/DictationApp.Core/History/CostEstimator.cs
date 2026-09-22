@@ -12,18 +12,13 @@ public static class CostEstimator
         ["universal-streaming"] = 0.15m,
     };
 
-    // (input, output) USD per 1M tokens, from GET /v1/models on 2026-09-22.
+    // (input, output) USD per 1M tokens. Cleanup runs on Groq's free tier, so every Groq model costs nothing;
+    // the table exists for anyone pointing LlmBaseUrl at a paid OpenAI-compatible endpoint.
     private static readonly Dictionary<string, (decimal In, decimal Out)> LlmPerMillion = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["gemini-2.5-flash-lite"] = (0.10m, 0.40m),
-        ["gemini-2.5-flash"] = (0.30m, 2.50m),
-        ["gemini-2.5-pro"] = (1.25m, 10m),
-        ["claude-haiku-4-5-20251001"] = (1m, 5m),
-        ["claude-sonnet-4-5-20250929"] = (3m, 15m),
-        ["gpt-5-nano"] = (0.05m, 0.40m),
-        ["gpt-5-mini"] = (0.25m, 2m),
-        ["gpt-oss-20b"] = (0.07m, 0.30m),
-        ["gpt-oss-120b"] = (0.15m, 0.60m),
+        ["qwen/qwen3.8-27b"] = (0m, 0m),
+        ["openai/gpt-oss-120b"] = (0m, 0m),
+        ["openai/gpt-oss-20b"] = (0m, 0m),
     };
 
     public static decimal SttCost(string speechModel, TimeSpan audioDuration)

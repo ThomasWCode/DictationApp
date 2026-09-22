@@ -96,6 +96,7 @@ public partial class App : Application
             if (_host is not null)
             {
                 _host.Services.GetService<TrayIcon>()?.Dispose();
+                _host.Services.GetService<UpdateCheckService>()?.ApplyPendingOnExit();
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
                 await _host.StopAsync(cts.Token);
                 _host.Dispose();
