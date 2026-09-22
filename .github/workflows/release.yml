@@ -1,0 +1,51 @@
+name: Release
+
+# Tag a commit `v1.2.3` to build a Velopack installer and attach it to a GitHub Release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to package (e.g. 0.1.0)"
+        required: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  package:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = if ('${{ github.event.inputs.version }}') { '${{ github.event.inputs.version }}' } else { '${{ github.ref_name }}'.TrimStart('v') }
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - name: Test
+        run: dotnet test tests/DictationApp.Core.Tests -c Release
+      - name: Install Velopack CLI
+        run: dotnet tool install -g vpk
+      - name: Pack
+        shell: pwsh
+        run: ./build/pack.ps1 -Version ${{ steps.ver.outputs.version }}
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            artifacts/releases/*
+      - name: Upload artifact (manual run)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: DictationApp-installer
+          path: artifacts/releases
