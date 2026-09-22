@@ -274,11 +274,29 @@ public sealed class DictationOrchestrator : BackgroundService
         switch (ev.Kind)
         {
             case ControlKind.ChordDown:
-                if (_machine.IsIdle && (_sessionTask is null || _sessionTask.IsCompleted))
+                if (_machine.IsIdle)
                 {
+                    // The second tap of a double tap arrives while the first tap's session is still being torn
+                    // down (socket abort, WAV discard). Chain behind it instead of flashing "busy".
+                    var previous = _sessionTask;
                     var session = new DictationSession(_time.GetUtcNow());
                     _session = session;
-                    _sessionTask = Task.Run(() => RunSessionAsync(session, ct), CancellationToken.None);
+                    _sessionTask = Task.Run(async () =>
+                    {
+                        if (previous is { IsCompleted: false })
+                        {
+                            try
+                            {
+                                await previous.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                            }
+                            catch (Exception)
+                            {
+                                // Previous session is stuck or faulted; start anyway.
+                            }
+                        }
+
+                        await RunSessionAsync(session, ct).ConfigureAwait(false);
+                    }, CancellationToken.None);
                 }
                 else
                 {
@@ -838,7 +856,7 @@ public sealed class DictationOrchestrator : BackgroundService
     {
         try
         {
-            _hotkeys.Configure(settings.HotkeyChord, settings.HotkeyMode);
+            _hotkeys.Configure(settings.HotkeyChord);
         }
         catch (Exception ex)
         {

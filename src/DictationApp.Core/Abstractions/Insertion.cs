@@ -86,5 +86,9 @@ public interface ISecretStore
 
 public interface IApiKeyProvider
 {
+    /// <summary>AssemblyAI key for streaming transcription.</summary>
     string? GetApiKey();
+
+    /// <summary>Groq (OpenAI-compatible) key for cleanup and tone. Null when cleanup is unavailable.</summary>
+    string? GetLlmApiKey();
 }

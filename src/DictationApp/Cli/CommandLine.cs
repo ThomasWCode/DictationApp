@@ -18,9 +18,12 @@ public sealed record CommandLineOptions(
     bool AcceptInjectedKeys,
     bool ShowSettings,
     string? OutputFile = null,
-    bool Smoke = false)
+    bool Smoke = false,
+    bool CheckUpdates = false,
+    string? GitHubToken = null,
+    bool ApplyUpdate = false)
 {
-    public bool IsCliMode => StreamTest is not null || Simulate is not null;
+    public bool IsCliMode => StreamTest is not null || Simulate is not null || CheckUpdates;
 
     public static CommandLineOptions Parse(string[] args)
     {
@@ -32,6 +35,9 @@ public sealed record CommandLineOptions(
         var showSettings = false;
         string? output = null;
         var smoke = false;
+        var checkUpdates = false;
+        string? githubToken = null;
+        var applyUpdate = false;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i].ToLowerInvariant())
@@ -61,10 +67,19 @@ public sealed record CommandLineOptions(
                 case "--smoke":
                     smoke = true;
                     break;
+                case "--check-updates":
+                    checkUpdates = true;
+                    break;
+                case "--github-token" when i + 1 < args.Length:
+                    githubToken = args[++i];
+                    break;
+                case "--apply-update":
+                    applyUpdate = true;
+                    break;
             }
         }
 
-        return new CommandLineOptions(streamTest, simulate, delay, minimized, injected, showSettings, output, smoke);
+        return new CommandLineOptions(streamTest, simulate, delay, minimized, injected, showSettings, output, smoke, checkUpdates, githubToken, applyUpdate);
     }
 }
 
@@ -152,12 +167,39 @@ public static class ConsoleRunner
                 return await SimulateAsync(host, orchestrator, simulate, options.DelaySeconds);
             }
 
+            if (options.CheckUpdates)
+            {
+                return await CheckUpdatesAsync(host, options);
+            }
+
             return 2;
         }
         finally
         {
             await host.StopAsync(TimeSpan.FromSeconds(5));
         }
+    }
+
+    /// <summary>Exit codes: 0 up to date, 10 update downloaded (and applied with --apply-update), 1 error.</summary>
+    private static async Task<int> CheckUpdatesAsync(IHost host, CommandLineOptions options)
+    {
+        var updates = host.Services.GetRequiredService<Services.UpdateCheckService>();
+        updates.TokenOverride = options.GitHubToken;
+        Console.WriteLine($"Installed: {updates.IsInstalled}  current version: {updates.CurrentVersion}");
+        var result = await updates.CheckNowAsync(CancellationToken.None);
+        Console.WriteLine(result);
+        if (!updates.HasPendingUpdate)
+        {
+            return result.StartsWith("Update check failed", StringComparison.Ordinal) ? 1 : 0;
+        }
+
+        if (options.ApplyUpdate)
+        {
+            Console.WriteLine($"Applying {updates.PendingVersion} and restarting ...");
+            updates.RestartToUpdate();
+        }
+
+        return 10;
     }
 
     private static async Task<int> StreamTestAsync(DictationOrchestrator orchestrator, string wav)

@@ -5,10 +5,11 @@ release: cleaned-up text lands in whatever text box has focus. If nothing editab
 clipboard with a toast. Native .NET 8 + WPF, tray-resident, ~60 MB idle.
 
 - **Speech-to-text**: AssemblyAI Universal-3.5 Pro streaming (WebSocket, 16 kHz PCM), with the personal
-  dictionary sent as keyterms.
-- **Cleanup and tone**: one call to the AssemblyAI LLM Gateway (levels None/Light/Medium/High, tones
-  Neutral/Formal/Casual) with a fallback chain and strict output validation. If the gateway is unavailable the
-  raw transcript is inserted and the Flow bar shows "cleanup skipped".
+  dictionary sent as keyterms. Hold the chord to dictate, or double-tap it for hands-free.
+- **Cleanup and tone**: one call to Groq's free-tier models (levels None/Light/Medium/High, tones
+  Neutral/Formal/Casual) with a fallback chain and strict output validation. If Groq is unavailable the raw
+  transcript is inserted and the Flow bar shows "cleanup skipped". The overlay can be the full bar, a tiny
+  level-only pill, or hidden.
 - **App-aware**: per-application rules (Outlook → Formal, Teams → Casual, VS Code → no cleanup…), browser tab
   host detection for Gmail/Docs, tone and level chips on the Flow bar, arrow keys to override while holding.
 - **History**: every dictation with searchable text and playable audio, retry for failed ones, "Undo AI edit",
@@ -23,8 +24,11 @@ Docs: [features](docs/features.md) · [implementation](docs/implementation.md) �
 Download `DictationApp-win-Setup.exe` from the latest [GitHub Release](https://github.com/ThomasWCode/DictationApp/releases)
 and run it. It installs per-user into `%LOCALAPPDATA%\DictationApp`, starts the app in the tray, and registers
 it to start with Windows (Autostart is on by default and can be turned off in Settings › General). Updates are
-picked up from the same releases feed and applied on the next restart. The executable is unsigned, so
-SmartScreen may show "More info → Run anyway" the first time.
+checked daily and from the tray menu; a newer release is downloaded at once and applied when you pick
+"Restart to update" or the next time the app starts. Settings and history live in
+`%LOCALAPPDATA%\ThomasWCode\DictationApp` and survive updates. While this repository is private the updater
+needs a GitHub token with read access to it (Settings › General). The executable is unsigned, so SmartScreen
+may show "More info → Run anyway" the first time.
 
 ## Build and run
 
@@ -50,6 +54,7 @@ First run opens a wizard for the API key, microphone and hotkey. The key is stor
 | `--minimized` | Used by the autostart entry; skips the first-run wizard. |
 | `--accept-injected-keys` | Treat synthetic key events as real (automation/testing). |
 | `--smoke` | Starts the tray app, constructs and closes every window (Settings, History, first-run, correction, Flow bar) and exits 0/1. Verifies XAML and DI wiring without a user. |
+| `--check-updates [--github-token T] [--apply-update]` | Runs the updater headlessly (installed builds only) and prints the outcome; exit 0 up to date, 10 update downloaded, 1 error. |
 
 A WAV for testing can be produced with Windows speech synthesis:
 

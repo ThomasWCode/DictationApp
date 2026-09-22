@@ -37,10 +37,19 @@
       <TabItem Header="General">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel Style="{StaticResource Tab}">
-            <TextBlock Text="Behaviour" Style="{StaticResource Heading}" />
-            <CheckBox Content="Show the Flow bar while dictating" IsChecked="{Binding ShowFlowBar}" />
+            <TextBlock Text="Overlay while dictating" Style="{StaticResource Heading}" />
+            <RadioButton Content="Full bar: state, live text, tone and cleanup chips" IsChecked="{Binding FlowBarMode, Converter={StaticResource EnumToBool}, ConverterParameter=Full}" />
+            <RadioButton Content="Minimal: a tiny pill showing only the microphone level" IsChecked="{Binding FlowBarMode, Converter={StaticResource EnumToBool}, ConverterParameter=Minimal}" />
+            <RadioButton Content="Hidden: no overlay" IsChecked="{Binding FlowBarMode, Converter={StaticResource EnumToBool}, ConverterParameter=Hidden}" />
+            <TextBlock Text="Behaviour" Style="{StaticResource Heading}" Margin="0,16,0,8" />
             <CheckBox Content="Start DictationApp when I sign in to Windows" IsChecked="{Binding Autostart}" />
             <CheckBox Content="Check for updates daily (installed builds only)" IsChecked="{Binding CheckForUpdates}" />
+            <DockPanel Margin="0,6,0,0">
+              <TextBlock DockPanel.Dock="Left" Text="GitHub token for updates" VerticalAlignment="Center" Margin="0,0,8,0" />
+              <PasswordBox x:Name="GitHubTokenBox" PasswordChanged="GitHubTokenBox_OnPasswordChanged" />
+            </DockPanel>
+            <TextBlock Style="{StaticResource Hint}" Text="Only needed while the GitHub repository is private: a fine-grained token with read access to the repository's contents lets the updater read releases. Stored encrypted. Leave empty to keep the stored token." />
+            <TextBlock Foreground="{StaticResource MutedTextBrush}" Visibility="{Binding HasGitHubToken, Converter={StaticResource BoolToVisibility}}" Text="A token is stored." />
             <TextBlock Text="Limits" Style="{StaticResource Heading}" Margin="0,16,0,8" />
             <StackPanel Orientation="Horizontal">
               <TextBlock Text="Stop a dictation automatically after" VerticalAlignment="Center" Margin="0,0,8,0" />
@@ -59,14 +68,18 @@
       <TabItem Header="API">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
           <StackPanel Style="{StaticResource Tab}">
-            <TextBlock Text="AssemblyAI API key" Style="{StaticResource Heading}" />
-            <TextBlock Style="{StaticResource Hint}" Text="One key covers streaming transcription and the LLM Gateway. It is stored encrypted with Windows DPAPI for your user account only." />
-            <DockPanel>
-              <Button DockPanel.Dock="Right" Content="Test key" Command="{Binding TestKeyCommand}" IsEnabled="{Binding TestingKey, Converter={StaticResource InverseBool}}" Margin="8,0,0,0" />
-              <PasswordBox x:Name="ApiKeyBox" PasswordChanged="ApiKeyBox_OnPasswordChanged" />
+            <TextBlock Text="AssemblyAI API key (transcription)" Style="{StaticResource Heading}" />
+            <TextBlock Style="{StaticResource Hint}" Text="Used only for streaming speech-to-text. Stored encrypted with Windows DPAPI for your user account. Leave empty to keep the stored key or to use the ASSEMBLYAI_API_KEY environment variable." />
+            <PasswordBox x:Name="ApiKeyBox" PasswordChanged="ApiKeyBox_OnPasswordChanged" />
+            <TextBlock Margin="0,4,0,0" Foreground="{StaticResource MutedTextBrush}" Visibility="{Binding HasStoredKey, Converter={StaticResource BoolToVisibility}}" Text="An AssemblyAI key is stored." />
+            <TextBlock Text="Groq API key (cleanup and tone)" Style="{StaticResource Heading}" Margin="0,16,0,8" />
+            <TextBlock Style="{StaticResource Hint}" Text="Used for cleanup levels and tones. A free Groq account is enough: the default models are all on the free tier. Leave empty to keep the stored key or to use the GROQ_API_KEY environment variable. Without any Groq key the raw transcript is inserted." />
+            <PasswordBox x:Name="GroqKeyBox" PasswordChanged="GroqKeyBox_OnPasswordChanged" />
+            <TextBlock Margin="0,4,0,0" Foreground="{StaticResource MutedTextBrush}" Visibility="{Binding HasGroqKey, Converter={StaticResource BoolToVisibility}}" Text="A Groq key is stored." />
+            <DockPanel Margin="0,8,0,0">
+              <Button DockPanel.Dock="Left" Content="Test keys" Command="{Binding TestKeyCommand}" IsEnabled="{Binding TestingKey, Converter={StaticResource InverseBool}}" />
+              <TextBlock Text="{Binding TestKeyStatus}" VerticalAlignment="Center" TextWrapping="Wrap" />
             </DockPanel>
-            <TextBlock Margin="0,6,0,0" Foreground="{StaticResource MutedTextBrush}" Visibility="{Binding HasStoredKey, Converter={StaticResource BoolToVisibility}}" Text="A key is stored. Leave the box empty to keep it, or paste a new one to replace it." />
-            <TextBlock Text="{Binding TestKeyStatus}" Margin="0,6,0,0" TextWrapping="Wrap" />
             <TextBlock Text="Models" Style="{StaticResource Heading}" Margin="0,18,0,8" />
             <Grid>
               <Grid.ColumnDefinitions>
@@ -77,15 +90,18 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
               </Grid.RowDefinitions>
               <TextBlock Grid.Row="0" Grid.Column="0" Text="Speech model" VerticalAlignment="Center" />
               <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding SpeechModels}" SelectedItem="{Binding SpeechModel}" Margin="0,3" />
-              <TextBlock Grid.Row="1" Grid.Column="0" Text="Cleanup model" VerticalAlignment="Center" />
-              <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding LlmModel, UpdateSourceTrigger=PropertyChanged}" Margin="0,3" />
-              <TextBlock Grid.Row="2" Grid.Column="0" Text="Fallback models" VerticalAlignment="Center" />
-              <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding LlmFallbackModels, UpdateSourceTrigger=PropertyChanged}" Margin="0,3" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Text="Cleanup endpoint" VerticalAlignment="Center" />
+              <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding LlmBaseUrl, UpdateSourceTrigger=PropertyChanged}" Margin="0,3" />
+              <TextBlock Grid.Row="2" Grid.Column="0" Text="Cleanup model" VerticalAlignment="Center" />
+              <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding LlmModel, UpdateSourceTrigger=PropertyChanged}" Margin="0,3" />
+              <TextBlock Grid.Row="3" Grid.Column="0" Text="Fallback models" VerticalAlignment="Center" />
+              <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding LlmFallbackModels, UpdateSourceTrigger=PropertyChanged}" Margin="0,3" />
             </Grid>
-            <TextBlock Style="{StaticResource Hint}" Text="universal-3-5-pro (~$0.45/h) supports the personal dictionary and formatted turns; universal-streaming (~$0.15/h) is cheaper. Cleanup models are tried in order; any ID from GET /v1/models on the LLM Gateway works." />
+            <TextBlock Style="{StaticResource Hint}" Text="universal-3-5-pro (~$0.45/h) supports the personal dictionary and formatted turns; universal-streaming (~$0.15/h) is cheaper. Cleanup models are tried in order when one is rate-limited (Groq free tier: about 1000 requests per day and 8000 tokens per minute per model). Defaults: openai/gpt-oss-120b, then qwen/qwen3.8-27b, then openai/gpt-oss-20b. Any OpenAI-compatible endpoint works." />
           </StackPanel>
         </ScrollViewer>
       </TabItem>
@@ -101,12 +117,11 @@
             <TextBox x:Name="ChordBox" Text="{Binding HotkeyText, UpdateSourceTrigger=PropertyChanged}" PreviewKeyDown="ChordBox_OnPreviewKeyDown" PreviewKeyUp="ChordBox_OnPreviewKeyUp" FontFamily="Consolas" FontSize="14" />
           </DockPanel>
           <TextBlock Text="{Binding HotkeyError}" Foreground="{StaticResource RecordingBrush}" Margin="0,6,0,0" />
-          <TextBlock Text="Mode" Style="{StaticResource Heading}" Margin="0,18,0,8" />
-          <RadioButton Content="Hold to talk: hold the chord, speak, release" IsChecked="{Binding HotkeyMode, Converter={StaticResource EnumToBool}, ConverterParameter=Hold}" />
-          <RadioButton Content="Double-tap to toggle: tap twice to start, tap once to stop" IsChecked="{Binding HotkeyMode, Converter={StaticResource EnumToBool}, ConverterParameter=DoubleTapToggle}" />
+          <TextBlock Text="How to dictate" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <TextBlock Style="{StaticResource Hint}" Text="Hold: press the chord, speak, release. Hands-free: tap the chord twice quickly to start, then press it once to stop. Both work all the time; a lone tap shorter than 300 ms does nothing." />
           <TextBlock Text="Advanced" Style="{StaticResource Heading}" Margin="0,18,0,8" />
           <CheckBox Content="Accept injected (synthetic) key events as real keys (for automation and testing)" IsChecked="{Binding AcceptInjectedKeys}" />
-          <TextBlock Style="{StaticResource Hint}" Text="While the chord is held, Escape discards the dictation, ←/→ change the tone and ↑/↓ the cleanup level. Other keys are swallowed so Win+Ctrl shortcuts cannot fire mid-dictation." />
+          <TextBlock Style="{StaticResource Hint}" Text="While the chord is held, Escape discards the dictation, ←/→ change the tone and ↑/↓ the cleanup level; other keys are swallowed so Win+Ctrl shortcuts cannot fire mid-dictation. In hands-free mode only Escape is intercepted; use the Flow bar chips to change tone or cleanup." />
         </StackPanel>
       </TabItem>
 

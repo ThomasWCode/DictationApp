@@ -7,24 +7,42 @@ using DictationApp.Core.Rules;
 
 namespace DictationApp.Core.Settings;
 
+/// <summary>How much of the overlay to show while dictating.</summary>
+public enum FlowBarMode
+{
+    /// <summary>State, live transcript, level meter and tone/level chips.</summary>
+    Full,
+
+    /// <summary>A tiny pill with only the microphone level.</summary>
+    Minimal,
+
+    /// <summary>No overlay at all.</summary>
+    Hidden,
+}
+
 /// <summary>Everything the user can configure. Serialised to <c>%LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json</c>.</summary>
 public sealed class AppSettings
 {
     public const string SpeechModelPro = "universal-3-5-pro";
     public const string SpeechModelStandard = "universal-streaming";
-    public const string DefaultLlmModel = "gemini-2.5-flash-lite";
+    public const string DefaultLlmBaseUrl = "https://api.groq.com/openai/v1/";
+    public const string DefaultLlmModel = "openai/gpt-oss-120b";
 
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = 2;
 
-    /// <summary>DPAPI-protected, base64. Never the plaintext key.</summary>
+    /// <summary>AssemblyAI key (transcription). DPAPI-protected, base64. Never the plaintext key.</summary>
     public string? ApiKeyProtected { get; set; }
+
+    /// <summary>Groq key (cleanup and tone). DPAPI-protected, base64.</summary>
+    public string? GroqApiKeyProtected { get; set; }
+
+    /// <summary>Optional GitHub token so the updater can read releases of a private repository. DPAPI-protected.</summary>
+    public string? GitHubTokenProtected { get; set; }
 
     public string SpeechModel { get; set; } = SpeechModelPro;
 
     /// <summary>Chord text such as "Ctrl+Win". Parsed by <see cref="HotkeyChord.Parse"/>.</summary>
     public string Hotkey { get; set; } = HotkeyChord.Default.ToString();
-
-    public HotkeyMode HotkeyMode { get; set; } = HotkeyMode.Hold;
 
     /// <summary>WASAPI device ID, or null for the default communications device.</summary>
     public string? MicrophoneDeviceId { get; set; }
@@ -33,9 +51,13 @@ public sealed class AppSettings
 
     public CleanupLevel DefaultCleanupLevel { get; set; } = CleanupLevel.Light;
 
+    /// <summary>OpenAI-compatible chat completions base URL. Groq by default.</summary>
+    public string LlmBaseUrl { get; set; } = DefaultLlmBaseUrl;
+
     public string LlmModel { get; set; } = DefaultLlmModel;
 
-    public List<string> LlmFallbackModels { get; set; } = ["gemini-2.5-flash", "claude-haiku-4-5-20251001"];
+    /// <summary>Tried in order when the primary model fails or is rate-limited. Free-tier Groq models only.</summary>
+    public List<string> LlmFallbackModels { get; set; } = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b"];
 
     public bool StoreAudio { get; set; } = true;
 
@@ -56,7 +78,7 @@ public sealed class AppSettings
 
     public int MaxDictationMinutes { get; set; } = 20;
 
-    public bool ShowFlowBar { get; set; } = true;
+    public FlowBarMode FlowBarMode { get; set; } = FlowBarMode.Full;
 
     public bool CheckForUpdates { get; set; } = true;
 
@@ -77,6 +99,12 @@ public sealed class AppSettings
 
     [JsonIgnore]
     public bool HasApiKey => !string.IsNullOrEmpty(ApiKeyProtected);
+
+    [JsonIgnore]
+    public bool HasGroqKey => !string.IsNullOrEmpty(GroqApiKeyProtected);
+
+    [JsonIgnore]
+    public bool HasGitHubToken => !string.IsNullOrEmpty(GitHubTokenProtected);
 
     [JsonIgnore]
     public TimeSpan MaxDictationDuration => TimeSpan.FromMinutes(Math.Clamp(MaxDictationMinutes, 1, 180));

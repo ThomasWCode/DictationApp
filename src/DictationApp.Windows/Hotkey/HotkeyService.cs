@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using DictationApp.Core.Abstractions;
+using DictationApp.Core.Session;
 using DictationApp.Core.Settings;
 using DictationApp.Windows.Native;
 using Microsoft.Extensions.Logging;
@@ -7,8 +8,19 @@ using Microsoft.Extensions.Logging;
 namespace DictationApp.Windows.Hotkey;
 
 /// <summary>
-/// Tracks the configured chord on top of <see cref="LowLevelKeyboardHook"/>. All state is touched only on
-/// the hook thread; events are dispatched to the thread pool so the hook returns immediately.
+/// Tracks the configured chord on top of <see cref="LowLevelKeyboardHook"/>. Key state is touched only on
+/// the hook thread; the few fields shared with the status hub are guarded by a lock. Events are dispatched
+/// through an ordered channel so the hook returns immediately.
+///
+/// Both ways of dictating work at the same time:
+/// <list type="bullet">
+/// <item><b>Hold</b>: press the chord, speak, release. A press shorter than <see cref="TapThreshold"/> is a tap.</item>
+/// <item><b>Double-tap</b>: two taps within <see cref="DoubleTapWindow"/> start a hands-free dictation; any
+/// later press of the chord stops it. Hands-free mode swallows only Escape (discard); other keys pass through.</item>
+/// </list>
+/// A hands-free dictation can also end without a key press (Escape, the time cap, a network fault), so the
+/// service watches the <see cref="DictationStatusHub"/> and drops the hands-free flag when the session that
+/// carried it returns to Idle; otherwise the next chord press would be swallowed as a "stop".
 ///
 /// Win-key handling: when a chord containing Win fires we inject the unassigned virtual key 0xE8 (down+up).
 /// Windows then treats the Win press as "used in a combination" and does not open Start on release.
@@ -16,26 +28,33 @@ namespace DictationApp.Windows.Hotkey;
 /// </summary>
 public sealed class HotkeyService : IHotkeyService, IDisposable
 {
-    private static readonly TimeSpan DoubleTapWindow = TimeSpan.FromMilliseconds(400);
+    public static readonly TimeSpan TapThreshold = TimeSpan.FromMilliseconds(300);
+    public static readonly TimeSpan DoubleTapWindow = TimeSpan.FromMilliseconds(400);
 
     private readonly LowLevelKeyboardHook _hook;
+    private readonly DictationStatusHub _hub;
     private readonly ILogger<HotkeyService> _logger;
     private readonly HashSet<int> _down = [];
     private readonly Channel<Action> _dispatch = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly object _sync = new();
     private HotkeyChord _chord = HotkeyChord.Default;
-    private HotkeyMode _mode = HotkeyMode.Hold;
-    private bool _chordActive;        // Hold mode: chord physically held and dictation running
-    private bool _toggledOn;          // DoubleTap mode: dictation running
-    private bool _chordPressed;       // all chord keys currently down (either mode)
+    private bool _holding;            // chord physically held and a dictation running
+    private bool _toggledOn;          // hands-free dictation running after a double tap
+    private bool _stopPress;          // the current press stopped a hands-free dictation; ignore its release
+    private bool _chordPressed;       // all chord keys currently down
     private bool _winConsumed;        // Win was combined with a non-chord key; leave it to Windows
     private bool _suppressedThisPress;
-    private long _lastTapTicks;
+    private int _downsSinceActive;    // ChordDowns raised that the hub has not yet answered with an active state
+    private long _pressedAt;
+    private long _lastTapReleasedAt;
 
-    public HotkeyService(LowLevelKeyboardHook hook, ILogger<HotkeyService> logger)
+    public HotkeyService(LowLevelKeyboardHook hook, DictationStatusHub hub, ILogger<HotkeyService> logger)
     {
         _hook = hook;
+        _hub = hub;
         _logger = logger;
         _hook.Filter = Filter;
+        _hub.Changed += OnStatusChanged;
         _ = Task.Run(DispatchLoopAsync);
     }
 
@@ -47,7 +66,19 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     public event Action<ArrowDirection>? ArrowPressed;
 
-    public bool IsChordHeld => _chordActive || _toggledOn;
+    public bool IsChordHeld => _holding || IsHandsFree;
+
+    /// <summary>True while a double-tap (hands-free) dictation is running.</summary>
+    public bool IsHandsFree
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _toggledOn;
+            }
+        }
+    }
 
     public bool Enabled { get; set; } = true;
 
@@ -56,22 +87,23 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     public HotkeyChord Chord => _chord;
 
-    public HotkeyMode Mode => _mode;
-
     /// <summary>Replaceable so unit tests do not inject real keystrokes.</summary>
     internal Action SuppressWinKey { get; set; } = WinKeySuppressor.Suppress;
 
+    /// <summary>Millisecond clock, replaceable in tests to simulate holds and tap gaps.</summary>
+    internal Func<long> Clock { get; set; } = static () => Environment.TickCount64;
+
     public void Start() => _hook.Start();
 
-    public void Configure(HotkeyChord chord, HotkeyMode mode)
+    public void Configure(HotkeyChord chord)
     {
         _chord = chord;
-        _mode = mode;
-        _logger.LogInformation("Hotkey configured: {Chord} ({Mode})", chord, mode);
+        _logger.LogInformation("Hotkey configured: {Chord} (hold, or double-tap for hands-free)", chord);
     }
 
     public void Dispose()
     {
+        _hub.Changed -= OnStatusChanged;
         _dispatch.Writer.TryComplete();
         _hook.Dispose();
     }
@@ -90,18 +122,26 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
         {
             if (!_down.Add(vk))
             {
-                // Auto-repeat. Swallow repeats of non-chord keys while dictating so nothing leaks into the target.
-                return _chordActive && !isChordKey;
+                // Auto-repeat. Swallow repeats of non-chord keys while holding so nothing leaks into the target.
+                return _holding && !isChordKey;
             }
 
-            if (_chordActive)
+            if (_holding && !isChordKey)
             {
-                if (isChordKey)
+                return HandleKeyWhileHolding(vk);
+            }
+
+            if (!isChordKey && vk == HotkeyChord.VkEscape && IsHandsFree)
+            {
+                // Discard ends the hands-free session; the next chord press must start a new one, not "stop".
+                lock (_sync)
                 {
-                    return false;
+                    _toggledOn = false;
                 }
 
-                return HandleKeyWhileDictating(vk);
+                _lastTapReleasedAt = 0;
+                Raise(EscapePressed);
+                return true;
             }
 
             if (!isChordKey && (_down.Contains(HotkeyChord.VkLWin) || _down.Contains(HotkeyChord.VkControl) || _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkShift)))
@@ -136,7 +176,7 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
         return false;
     }
 
-    private bool HandleKeyWhileDictating(int vk)
+    private bool HandleKeyWhileHolding(int vk)
     {
         switch (vk)
         {
@@ -188,42 +228,85 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
             return;
         }
 
-        switch (_mode)
+        lock (_sync)
         {
-            case HotkeyMode.Hold:
-                _chordActive = true;
-                Raise(ChordDown);
-                break;
-            case HotkeyMode.DoubleTapToggle:
-                if (_toggledOn)
-                {
-                    _toggledOn = false;
-                    Raise(ChordUp);
-                    break;
-                }
+            if (_toggledOn)
+            {
+                // Any press while hands-free stops the dictation; its release is not a new tap.
+                _toggledOn = false;
+                _stopPress = true;
+                _lastTapReleasedAt = 0;
+                Raise(ChordUp);
+                return;
+            }
 
-                var now = Environment.TickCount64;
-                if (now - _lastTapTicks <= DoubleTapWindow.TotalMilliseconds)
-                {
-                    _lastTapTicks = 0;
-                    _toggledOn = true;
-                    Raise(ChordDown);
-                }
-                else
-                {
-                    _lastTapTicks = now;
-                }
-
-                break;
+            _downsSinceActive++;
         }
+
+        _pressedAt = Clock();
+        _holding = true;
+        Raise(ChordDown);
     }
 
     private void OnChordReleased()
     {
-        if (_chordActive)
+        if (_stopPress)
         {
-            _chordActive = false;
-            Raise(ChordUp);
+            _stopPress = false;
+            return;
+        }
+
+        if (!_holding)
+        {
+            return;
+        }
+
+        var now = Clock();
+        var held = now - _pressedAt;
+        _holding = false;
+        if (held < TapThreshold.TotalMilliseconds)
+        {
+            if (_lastTapReleasedAt != 0 && _pressedAt - _lastTapReleasedAt <= DoubleTapWindow.TotalMilliseconds)
+            {
+                // Second tap: keep the dictation running hands-free. No ChordUp.
+                _lastTapReleasedAt = 0;
+                lock (_sync)
+                {
+                    _toggledOn = true;
+                }
+
+                return;
+            }
+
+            _lastTapReleasedAt = now;
+            Raise(ChordUp); // a lone tap: the orchestrator cancels it as a short press
+            return;
+        }
+
+        _lastTapReleasedAt = 0;
+        Raise(ChordUp);
+    }
+
+    /// <summary>
+    /// Tracks the orchestrator's state so a hands-free flag never outlives its session. An Idle that arrives
+    /// while a ChordDown is still unanswered belongs to the previous session (the cancelled first tap of a
+    /// double tap) and must not clear the flag the second tap just set.
+    /// </summary>
+    private void OnStatusChanged(DictationStatus status)
+    {
+        lock (_sync)
+        {
+            if (status.State != DictationState.Idle)
+            {
+                _downsSinceActive = 0;
+                return;
+            }
+
+            if (_downsSinceActive == 0 && _toggledOn)
+            {
+                _toggledOn = false;
+                _logger.LogDebug("Hands-free dictation ended by the session; chord re-armed");
+            }
         }
     }
 

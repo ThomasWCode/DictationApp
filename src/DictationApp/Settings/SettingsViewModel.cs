@@ -28,16 +28,21 @@ public sealed partial class SettingsViewModel : ObservableObject
     private IAudioCapture? _micTest;
 
     // General
-    [ObservableProperty] private bool _showFlowBar;
+    [ObservableProperty] private FlowBarMode _flowBarMode;
     [ObservableProperty] private bool _autostart;
     [ObservableProperty] private bool _checkForUpdates;
+    [ObservableProperty] private string _gitHubToken = string.Empty;
+    [ObservableProperty] private bool _hasGitHubToken;
     [ObservableProperty] private int _maxDictationMinutes;
     [ObservableProperty] private string _languageCodes = string.Empty;
 
     // API
     [ObservableProperty] private string _apiKey = string.Empty;
     [ObservableProperty] private bool _hasStoredKey;
+    [ObservableProperty] private string _groqApiKey = string.Empty;
+    [ObservableProperty] private bool _hasGroqKey;
     [ObservableProperty] private string _speechModel = AppSettings.SpeechModelPro;
+    [ObservableProperty] private string _llmBaseUrl = AppSettings.DefaultLlmBaseUrl;
     [ObservableProperty] private string _llmModel = AppSettings.DefaultLlmModel;
     [ObservableProperty] private string _llmFallbackModels = string.Empty;
     [ObservableProperty] private string _testKeyStatus = string.Empty;
@@ -45,7 +50,6 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     // Hotkey
     [ObservableProperty] private string _hotkeyText = HotkeyChord.Default.ToString();
-    [ObservableProperty] private HotkeyMode _hotkeyMode;
     [ObservableProperty] private bool _acceptInjectedKeys;
     [ObservableProperty] private string _hotkeyError = string.Empty;
 
@@ -110,7 +114,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public IReadOnlyList<PasteMode> PasteModes { get; } = Enum.GetValues<PasteMode>();
 
-    public IReadOnlyList<HotkeyMode> HotkeyModes { get; } = Enum.GetValues<HotkeyMode>();
+    public IReadOnlyList<FlowBarMode> FlowBarModes { get; } = Enum.GetValues<FlowBarMode>();
 
     public IReadOnlyList<RetentionPolicy> RetentionPolicies { get; } = Enum.GetValues<RetentionPolicy>();
 
@@ -118,17 +122,19 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     private void Load(AppSettings s)
     {
-        ShowFlowBar = s.ShowFlowBar;
+        FlowBarMode = s.FlowBarMode;
+        HasGitHubToken = s.HasGitHubToken;
         Autostart = RunKeyAutostart.IsEnabled() || s.Autostart;
         CheckForUpdates = s.CheckForUpdates;
         MaxDictationMinutes = s.MaxDictationMinutes;
         LanguageCodes = s.LanguageCodes ?? string.Empty;
         HasStoredKey = s.HasApiKey;
+        HasGroqKey = s.HasGroqKey;
         SpeechModel = s.SpeechModel;
+        LlmBaseUrl = s.LlmBaseUrl;
         LlmModel = s.LlmModel;
         LlmFallbackModels = string.Join(", ", s.LlmFallbackModels);
         HotkeyText = s.Hotkey;
-        HotkeyMode = s.HotkeyMode;
         AcceptInjectedKeys = s.AcceptInjectedKeys;
         SelectedMicrophoneId = s.MicrophoneDeviceId ?? string.Empty;
         DefaultTone = s.DefaultTone;
@@ -162,11 +168,18 @@ public sealed partial class SettingsViewModel : ObservableObject
         HotkeyError = string.Empty;
         StopMicTest();
         var key = ApiKey.Trim();
+        var groqKey = GroqApiKey.Trim();
+        var gitHubToken = GitHubToken.Trim();
         try
         {
             await _store.UpdateAsync(s =>
             {
-                s.ShowFlowBar = ShowFlowBar;
+                s.FlowBarMode = FlowBarMode;
+                if (gitHubToken.Length > 0)
+                {
+                    s.GitHubTokenProtected = _secrets.Protect(gitHubToken);
+                }
+
                 s.Autostart = Autostart;
                 s.CheckForUpdates = CheckForUpdates;
                 s.MaxDictationMinutes = Math.Clamp(MaxDictationMinutes, 1, 180);
@@ -176,11 +189,16 @@ public sealed partial class SettingsViewModel : ObservableObject
                     s.ApiKeyProtected = _secrets.Protect(key);
                 }
 
+                if (groqKey.Length > 0)
+                {
+                    s.GroqApiKeyProtected = _secrets.Protect(groqKey);
+                }
+
                 s.SpeechModel = SpeechModel;
+                s.LlmBaseUrl = string.IsNullOrWhiteSpace(LlmBaseUrl) ? AppSettings.DefaultLlmBaseUrl : LlmBaseUrl.Trim();
                 s.LlmModel = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
                 s.LlmFallbackModels = LlmFallbackModels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
                 s.Hotkey = chord.ToString();
-                s.HotkeyMode = HotkeyMode;
                 s.AcceptInjectedKeys = AcceptInjectedKeys;
                 s.MicrophoneDeviceId = string.IsNullOrEmpty(SelectedMicrophoneId) ? null : SelectedMicrophoneId;
                 s.DefaultTone = DefaultTone;
@@ -203,7 +221,11 @@ public sealed partial class SettingsViewModel : ObservableObject
             }
 
             ApiKey = string.Empty;
+            GroqApiKey = string.Empty;
+            GitHubToken = string.Empty;
             HasStoredKey = _store.Current.HasApiKey;
+            HasGroqKey = _store.Current.HasGroqKey;
+            HasGitHubToken = _store.Current.HasGitHubToken;
             RequestClose?.Invoke();
         }
         catch (Exception ex)
@@ -231,55 +253,92 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         if (key.Length == 0)
         {
-            TestKeyStatus = "Enter an API key first.";
+            key = Environment.GetEnvironmentVariable(SettingsApiKeyProvider.EnvironmentVariable)?.Trim() ?? string.Empty;
+        }
+
+        var groqKey = GroqApiKey.Trim();
+        if (groqKey.Length == 0 && HasGroqKey)
+        {
+            groqKey = _secrets.Unprotect(_store.Current.GroqApiKeyProtected!) ?? string.Empty;
+        }
+
+        if (groqKey.Length == 0)
+        {
+            groqKey = Environment.GetEnvironmentVariable(SettingsApiKeyProvider.LlmEnvironmentVariable)?.Trim() ?? string.Empty;
+        }
+
+        if (key.Length == 0 && groqKey.Length == 0)
+        {
+            TestKeyStatus = "Enter at least one key first.";
             return;
         }
 
         TestingKey = true;
         TestKeyStatus = "Testing…";
+        var parts = new List<string>();
         try
         {
             using var client = _http.CreateClient();
             client.Timeout = TimeSpan.FromSeconds(15);
 
-            // 1. Streaming: a short-lived token proves the key is valid for the core feature.
-            using var tokenReq = new HttpRequestMessage(HttpMethod.Get, "https://streaming.assemblyai.com/v3/token?expires_in_seconds=60");
-            tokenReq.Headers.Authorization = new AuthenticationHeaderValue(key);
-            using var tokenResp = await client.SendAsync(tokenReq);
-            if (!tokenResp.IsSuccessStatusCode)
+            // 1. AssemblyAI streaming: a short-lived token proves the key is valid for transcription.
+            if (key.Length == 0)
             {
-                TestKeyStatus = $"Key rejected by the streaming API (HTTP {(int)tokenResp.StatusCode}).";
-                return;
-            }
-
-            // 2. LLM Gateway: a one-token completion tells us whether cleanup will work on this account.
-            using var llmReq = new HttpRequestMessage(HttpMethod.Post, "https://llm-gateway.assemblyai.com/v1/chat/completions");
-            llmReq.Headers.Authorization = new AuthenticationHeaderValue(key);
-            var model = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
-            llmReq.Content = new StringContent("{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"max_tokens\":2}", System.Text.Encoding.UTF8, "application/json");
-            using var llmResp = await client.SendAsync(llmReq);
-            if (llmResp.IsSuccessStatusCode)
-            {
-                TestKeyStatus = $"Key valid. Streaming OK, LLM cleanup OK ({model}).";
+                parts.Add("AssemblyAI: no key (transcription will not work).");
             }
             else
             {
-                var body = await llmResp.Content.ReadAsStringAsync();
-                var hint = body.Contains("does not have access", StringComparison.OrdinalIgnoreCase)
-                    ? "this account has no LLM Gateway access, so cleanup levels fall back to raw text"
-                    : $"HTTP {(int)llmResp.StatusCode}";
-                TestKeyStatus = $"Key valid for streaming. LLM cleanup unavailable: {hint}.";
+                using var tokenReq = new HttpRequestMessage(HttpMethod.Get, "https://streaming.assemblyai.com/v3/token?expires_in_seconds=60");
+                tokenReq.Headers.Authorization = new AuthenticationHeaderValue(key);
+                using var tokenResp = await client.SendAsync(tokenReq);
+                parts.Add(tokenResp.IsSuccessStatusCode ? "AssemblyAI: OK." : $"AssemblyAI: rejected (HTTP {(int)tokenResp.StatusCode}).");
             }
+
+            // 2. Groq: a two-token completion with the configured model proves key and model together.
+            if (groqKey.Length == 0)
+            {
+                parts.Add("Groq: no key (cleanup levels fall back to raw text).");
+            }
+            else
+            {
+                var baseUrl = string.IsNullOrWhiteSpace(LlmBaseUrl) ? AppSettings.DefaultLlmBaseUrl : LlmBaseUrl.Trim().TrimEnd('/') + "/";
+                var model = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
+                using var llmReq = new HttpRequestMessage(HttpMethod.Post, baseUrl + "chat/completions");
+                llmReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", groqKey);
+                var effort = Core.Cleanup.LlmPostProcessor.ReasoningEffortFor(model) is { } e ? ",\"reasoning_effort\":\"" + e + "\"" : string.Empty;
+                llmReq.Content = new StringContent("{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"max_tokens\":8" + effort + "}", System.Text.Encoding.UTF8, "application/json");
+                using var llmResp = await client.SendAsync(llmReq);
+                if (llmResp.IsSuccessStatusCode)
+                {
+                    parts.Add($"Groq: OK ({model}).");
+                }
+                else
+                {
+                    var body = await llmResp.Content.ReadAsStringAsync();
+                    var reason = (int)llmResp.StatusCode switch
+                    {
+                        401 => "key rejected",
+                        404 => "model not found; pick one from the free tier",
+                        429 => "rate limited right now (free tier); it will work again shortly",
+                        _ => $"HTTP {(int)llmResp.StatusCode}",
+                    };
+                    parts.Add($"Groq: {reason}. {Truncate(body, 120)}");
+                }
+            }
+
+            TestKeyStatus = string.Join(" ", parts);
         }
         catch (Exception ex)
         {
-            TestKeyStatus = "Test failed: " + ex.Message;
+            TestKeyStatus = string.Join(" ", parts) + " Test failed: " + ex.Message;
         }
         finally
         {
             TestingKey = false;
         }
     }
+
+    private static string Truncate(string s, int max) => s.Length <= max ? s : s[..max] + "…";
 
     [RelayCommand]
     private void UseDefaultChord() => HotkeyText = HotkeyChord.Default.ToString();

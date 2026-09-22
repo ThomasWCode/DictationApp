@@ -10,8 +10,9 @@ using DictationApp.Windows.Native;
 namespace DictationApp.Overlay;
 
 /// <summary>
-/// Bottom-centre overlay that never takes keyboard focus (WS_EX_NOACTIVATE). It appears when a dictation
-/// starts and lingers briefly after it ends so the user can read "Nothing heard" or "cleanup skipped".
+/// Bottom-centre overlay that never takes keyboard focus (WS_EX_NOACTIVATE). Three modes: the full bar
+/// (state, live text, chips), a minimal pill showing only the microphone level, or hidden. The full bar
+/// lingers briefly after a dictation so the user can read "Nothing heard" or "cleanup skipped".
 /// </summary>
 public partial class FlowBarWindow : Window
 {
@@ -23,6 +24,7 @@ public partial class FlowBarWindow : Window
     private readonly DispatcherTimer _hideTimer;
     private nint _targetWindow;
     private bool _attached;
+    private FlowBarMode _appliedMode = FlowBarMode.Full;
 
     public FlowBarWindow(FlowBarViewModel viewModel, DictationStatusHub hub, ISettingsStore settings)
     {
@@ -61,7 +63,8 @@ public partial class FlowBarWindow : Window
     private void OnStatus(DictationStatus status)
     {
         _viewModel.Apply(status);
-        if (!_settings.Current.ShowFlowBar)
+        var mode = _settings.Current.FlowBarMode;
+        if (mode == FlowBarMode.Hidden)
         {
             if (IsVisible)
             {
@@ -71,6 +74,7 @@ public partial class FlowBarWindow : Window
             return;
         }
 
+        ApplyMode(mode);
         if (status.IsActive)
         {
             _hideTimer.Stop();
@@ -79,24 +83,23 @@ public partial class FlowBarWindow : Window
                 _targetWindow = WindowHelper.GetForegroundWindow();
             }
 
+            Reposition();
             if (!IsVisible)
             {
-                Reposition();
                 Show();
-            }
-            else
-            {
-                Reposition();
             }
 
             AnimateDot(status.State == DictationState.Recording);
+            AnimateMini(status.State is DictationState.Finalising or DictationState.PostProcessing or DictationState.Inserting);
         }
         else
         {
             AnimateDot(false);
+            AnimateMini(false);
             if (IsVisible)
             {
-                if (string.IsNullOrEmpty(status.Badge))
+                // The minimal pill has nothing to say once idle; the full bar lingers to show its badge.
+                if (mode == FlowBarMode.Minimal || string.IsNullOrEmpty(status.Badge))
                 {
                     Hide();
                 }
@@ -109,19 +112,31 @@ public partial class FlowBarWindow : Window
         }
     }
 
+    private void ApplyMode(FlowBarMode mode)
+    {
+        if (mode == _appliedMode && IsLoaded)
+        {
+            return;
+        }
+
+        _appliedMode = mode;
+        var minimal = mode == FlowBarMode.Minimal;
+        Root.Visibility = minimal ? Visibility.Collapsed : Visibility.Visible;
+        MiniRoot.Visibility = minimal ? Visibility.Visible : Visibility.Collapsed;
+        InvalidateMeasure();
+    }
+
     private void Reposition()
     {
         var anchor = _targetWindow != 0 && WindowHelper.IsWindow(_targetWindow) ? _targetWindow : WindowHelper.GetForegroundWindow();
-        var (left, top, right, bottom) = WindowHelper.GetWorkArea(anchor);
+        var (left, _, right, bottom) = WindowHelper.GetWorkArea(anchor);
         var scale = WindowHelper.GetDpiScale(anchor);
-        // Measure first so ActualWidth is valid before the first Show.
         Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        var width = ActualWidth > 0 ? ActualWidth : DesiredSize.Width;
-        var height = ActualHeight > 0 ? ActualHeight : DesiredSize.Height;
+        var width = DesiredSize.Width > 0 ? DesiredSize.Width : ActualWidth;
+        var height = DesiredSize.Height > 0 ? DesiredSize.Height : ActualHeight;
         var centreX = (left + right) / 2.0 / scale;
         Left = centreX - width / 2;
-        Top = bottom / scale - height - 12;
-        _ = top; // work area top is not needed for bottom anchoring
+        Top = bottom / scale - height - (_appliedMode == FlowBarMode.Minimal ? 6 : 12);
     }
 
     private void AnimateDot(bool pulse)
@@ -140,6 +155,21 @@ public partial class FlowBarWindow : Window
         }
     }
 
+    /// <summary>While the text is being finished and inserted the tiny bar has no audio to show, so it breathes instead.</summary>
+    private void AnimateMini(bool busy)
+    {
+        if (busy)
+        {
+            var anim = new DoubleAnimation(1.0, 0.3, TimeSpan.FromMilliseconds(500)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever };
+            MiniFill.BeginAnimation(OpacityProperty, anim);
+        }
+        else
+        {
+            MiniFill.BeginAnimation(OpacityProperty, null);
+            MiniFill.Opacity = 1.0;
+        }
+    }
+
     private void Flash()
     {
         if (!IsVisible)
@@ -147,8 +177,9 @@ public partial class FlowBarWindow : Window
             return;
         }
 
+        var target = _appliedMode == FlowBarMode.Minimal ? MiniRoot : Root;
         var brush = new SolidColorBrush(Colors.White);
-        Root.BorderBrush = brush;
+        target.BorderBrush = brush;
         var anim = new ColorAnimation(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF), Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF), TimeSpan.FromMilliseconds(400));
         brush.BeginAnimation(SolidColorBrush.ColorProperty, anim);
     }

@@ -11,14 +11,15 @@ using Microsoft.Extensions.Logging;
 namespace DictationApp.Core.Cleanup;
 
 /// <summary>
-/// OpenAI-compatible chat call against the AssemblyAI LLM Gateway with a per-model fallback chain.
-/// Budget: 4 s per attempt, 8 s total. Any failure returns the normalised raw transcript so the user
-/// always gets their words.
+/// OpenAI-compatible chat call (Groq by default) with a per-model fallback chain. Budget: 4 s per attempt,
+/// 8 s total. Rate limits (429) and other failures move to the next model; any total failure returns the
+/// normalised raw transcript so the user always gets their words. Reasoning models (gpt-oss) are asked for
+/// low reasoning effort, otherwise they spend the whole completion budget thinking.
 /// </summary>
-public sealed class LlmGatewayPostProcessor : ITextPostProcessor
+public sealed class LlmPostProcessor : ITextPostProcessor
 {
-    public const string HttpClientName = "llm-gateway";
-    public static readonly Uri DefaultBaseAddress = new("https://llm-gateway.assemblyai.com/v1/");
+    public const string HttpClientName = "llm";
+    public static readonly Uri DefaultBaseAddress = new(AppSettings.DefaultLlmBaseUrl);
     public static readonly TimeSpan PerAttemptTimeout = TimeSpan.FromSeconds(4);
     public static readonly TimeSpan TotalTimeout = TimeSpan.FromSeconds(8);
 
@@ -30,14 +31,14 @@ public sealed class LlmGatewayPostProcessor : ITextPostProcessor
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IApiKeyProvider _keys;
     private readonly ISettingsStore _settings;
-    private readonly ILogger<LlmGatewayPostProcessor> _logger;
+    private readonly ILogger<LlmPostProcessor> _logger;
     private readonly TimeProvider _time;
 
-    public LlmGatewayPostProcessor(
+    public LlmPostProcessor(
         IHttpClientFactory httpClientFactory,
         IApiKeyProvider keys,
         ISettingsStore settings,
-        ILogger<LlmGatewayPostProcessor> logger,
+        ILogger<LlmPostProcessor> logger,
         TimeProvider? time = null)
     {
         _httpClientFactory = httpClientFactory;
@@ -53,6 +54,10 @@ public sealed class LlmGatewayPostProcessor : ITextPostProcessor
         var approxTokens = Math.Max(1, input.Length / 4);
         return Math.Clamp(2 * approxTokens + 100, 200, 4000);
     }
+
+    /// <summary>Groq's gpt-oss models accept reasoning_effort; "low" keeps latency and tokens down.</summary>
+    public static string? ReasoningEffortFor(string model) =>
+        model.Contains("gpt-oss", StringComparison.OrdinalIgnoreCase) ? "low" : null;
 
     public IReadOnlyList<string> ModelChain(string? overrideModel)
     {
@@ -72,13 +77,27 @@ public sealed class LlmGatewayPostProcessor : ITextPostProcessor
         return chain.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
+    public Uri BaseAddress
+    {
+        get
+        {
+            var url = _settings.Current.LlmBaseUrl;
+            if (!string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url.EndsWith('/') ? url : url + "/", UriKind.Absolute, out var uri))
+            {
+                return uri;
+            }
+
+            return DefaultBaseAddress;
+        }
+    }
+
     public async Task<PostProcessResult> ProcessAsync(string rawTranscript, PostProcessRequest request, CancellationToken ct)
     {
         var fallback = SpokenCommandNormaliser.Normalise(rawTranscript);
-        var key = _keys.GetApiKey();
+        var key = _keys.GetLlmApiKey();
         if (string.IsNullOrEmpty(key))
         {
-            return new PostProcessResult(fallback, false, null, "no-api-key");
+            return new PostProcessResult(fallback, false, null, "no-llm-key");
         }
 
         var models = ModelChain(request.ModelOverride);
@@ -103,6 +122,7 @@ public sealed class LlmGatewayPostProcessor : ITextPostProcessor
         using var totalTimer = CancelAfter(total, TotalTimeout);
         string? lastReason = null;
         var sw = Stopwatch.StartNew();
+        var baseAddress = BaseAddress;
 
         foreach (var model in models)
         {
@@ -116,22 +136,22 @@ public sealed class LlmGatewayPostProcessor : ITextPostProcessor
             try
             {
                 var client = _httpClientFactory.CreateClient(HttpClientName);
-                client.BaseAddress ??= DefaultBaseAddress;
+                client.BaseAddress = baseAddress;
                 using var req = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
-                req.Headers.Authorization = new AuthenticationHeaderValue(key);
-                req.Content = JsonContent.Create(body with { Model = model }, options: Json);
+                req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                req.Content = JsonContent.Create(body with { Model = model, ReasoningEffort = ReasoningEffortFor(model) }, options: Json);
                 using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, attempt.Token).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
                 {
                     var err = await resp.Content.ReadAsStringAsync(attempt.Token).ConfigureAwait(false);
                     lastReason = $"{model}:http-{(int)resp.StatusCode}";
-                    _logger.LogWarning("LLM gateway {Model} returned {Status}: {Body}", model, (int)resp.StatusCode, Truncate(err, 300));
+                    _logger.LogWarning("LLM {Model} returned {Status}: {Body}", model, (int)resp.StatusCode, Truncate(err, 300));
                     if (resp.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                     {
                         break; // bad key: no point trying other models
                     }
 
-                    continue;
+                    continue; // 429 rate limit, 404 unknown model, 5xx: next model
                 }
 
                 var chat = await resp.Content.ReadFromJsonAsync<ChatResponse>(Json, attempt.Token).ConfigureAwait(false);
@@ -144,18 +164,18 @@ public sealed class LlmGatewayPostProcessor : ITextPostProcessor
                     continue;
                 }
 
-                _logger.LogInformation("LLM cleanup via {Model} in {Elapsed} ms (level={Level}, tone={Tone})", model, sw.ElapsedMilliseconds, request.Level, request.Tone);
+                _logger.LogInformation("LLM cleanup via {Model} in {Elapsed} ms (level={Level}, tone={Tone}, tokens={Prompt}+{Completion})", model, sw.ElapsedMilliseconds, request.Level, request.Tone, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
                 return new PostProcessResult(validation.Text, true, model, null, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 lastReason = total.IsCancellationRequested ? "total-timeout" : $"{model}:timeout";
-                _logger.LogWarning("LLM gateway {Model} timed out after {Elapsed} ms", model, sw.ElapsedMilliseconds);
+                _logger.LogWarning("LLM {Model} timed out after {Elapsed} ms", model, sw.ElapsedMilliseconds);
             }
             catch (Exception ex) when (ex is HttpRequestException or JsonException or IOException)
             {
                 lastReason = $"{model}:{ex.GetType().Name}";
-                _logger.LogWarning(ex, "LLM gateway {Model} failed", model);
+                _logger.LogWarning(ex, "LLM {Model} failed", model);
             }
         }
 
@@ -199,6 +219,9 @@ public sealed class LlmGatewayPostProcessor : ITextPostProcessor
 
         [JsonPropertyName("temperature")]
         public double Temperature { get; init; }
+
+        [JsonPropertyName("reasoning_effort")]
+        public string? ReasoningEffort { get; init; }
     }
 
     private sealed class ChatResponse

@@ -2,15 +2,6 @@ using DictationApp.Core.Settings;
 
 namespace DictationApp.Core.Abstractions;
 
-public enum HotkeyMode
-{
-    /// <summary>Hold the chord to dictate, release to finish.</summary>
-    Hold,
-
-    /// <summary>Tap the chord twice quickly to start, tap once to stop.</summary>
-    DoubleTapToggle,
-}
-
 public enum ArrowDirection
 {
     Up,
@@ -21,8 +12,9 @@ public enum ArrowDirection
 
 /// <summary>
 /// Global hotkey source. Events are raised on a background thread and must not block.
-/// While the chord is held, arrow keys and Escape are swallowed so that OS shortcuts such as
-/// Win+Ctrl+Left (switch virtual desktop) do not fire mid-dictation.
+/// Holding the chord dictates until release; two quick taps start a hands-free dictation that the next
+/// press of the chord stops. While the chord is physically held, arrow keys and Escape are swallowed so
+/// that OS shortcuts such as Win+Ctrl+Left (switch virtual desktop) do not fire mid-dictation.
 /// </summary>
 public interface IHotkeyService
 {
@@ -39,5 +31,5 @@ public interface IHotkeyService
     /// <summary>When false the hook keeps running but no events are raised (tray "Pause hotkey").</summary>
     bool Enabled { get; set; }
 
-    void Configure(HotkeyChord chord, HotkeyMode mode);
+    void Configure(HotkeyChord chord);
 }
