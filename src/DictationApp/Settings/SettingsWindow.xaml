@@ -1,0 +1,227 @@
+<Window x:Class="DictationApp.Settings.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:DictationApp.Settings"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=local:SettingsViewModel}"
+        Title="DictationApp settings" Width="760" Height="600" MinWidth="640" MinHeight="480"
+        WindowStartupLocation="CenterScreen" Style="{StaticResource AppWindow}">
+  <Window.Resources>
+    <Style TargetType="StackPanel" x:Key="Tab">
+      <Setter Property="Margin" Value="18,14" />
+    </Style>
+    <Style TargetType="DataGrid">
+      <Setter Property="AutoGenerateColumns" Value="False" />
+      <Setter Property="CanUserAddRows" Value="False" />
+      <Setter Property="HeadersVisibility" Value="Column" />
+      <Setter Property="GridLinesVisibility" Value="Horizontal" />
+      <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}" />
+      <Setter Property="RowHeaderWidth" Value="0" />
+      <Setter Property="SelectionMode" Value="Single" />
+    </Style>
+  </Window.Resources>
+  <DockPanel>
+    <Border DockPanel.Dock="Bottom" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0" Padding="18,10" Background="{StaticResource SurfaceAltBrush}">
+      <DockPanel>
+        <TextBlock Text="{Binding SettingsPath}" Foreground="{StaticResource MutedTextBrush}" VerticalAlignment="Center" FontSize="11" TextTrimming="CharacterEllipsis" />
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+          <Button Content="Cancel" Command="{Binding CancelCommand}" IsCancel="True" />
+          <Button Content="Save" Command="{Binding SaveCommand}" Style="{StaticResource PrimaryButton}" IsDefault="True" Margin="0" />
+        </StackPanel>
+      </DockPanel>
+    </Border>
+    <TabControl BorderThickness="0,1,0,0" BorderBrush="{StaticResource BorderBrush}">
+      <!-- General -->
+      <TabItem Header="General">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Style="{StaticResource Tab}">
+            <TextBlock Text="Behaviour" Style="{StaticResource Heading}" />
+            <CheckBox Content="Show the Flow bar while dictating" IsChecked="{Binding ShowFlowBar}" />
+            <CheckBox Content="Start DictationApp when I sign in to Windows" IsChecked="{Binding Autostart}" />
+            <CheckBox Content="Check for updates daily (installed builds only)" IsChecked="{Binding CheckForUpdates}" />
+            <TextBlock Text="Limits" Style="{StaticResource Heading}" Margin="0,16,0,8" />
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Stop a dictation automatically after" VerticalAlignment="Center" Margin="0,0,8,0" />
+              <TextBox Width="60" Text="{Binding MaxDictationMinutes, UpdateSourceTrigger=PropertyChanged}" />
+              <TextBlock Text="minutes" VerticalAlignment="Center" Margin="8,0,0,0" />
+            </StackPanel>
+            <TextBlock Text="AssemblyAI bills per session second and caps sessions at 3 hours. 20 minutes matches Wispr Flow." Style="{StaticResource Hint}" />
+            <TextBlock Text="Language" Style="{StaticResource Heading}" Margin="0,8,0,8" />
+            <TextBox Text="{Binding LanguageCodes, UpdateSourceTrigger=PropertyChanged}" Width="260" HorizontalAlignment="Left" />
+            <TextBlock Text="Optional comma-separated language codes (e.g. en, de). Leave empty for automatic." Style="{StaticResource Hint}" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- API -->
+      <TabItem Header="API">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Style="{StaticResource Tab}">
+            <TextBlock Text="AssemblyAI API key" Style="{StaticResource Heading}" />
+            <TextBlock Style="{StaticResource Hint}" Text="One key covers streaming transcription and the LLM Gateway. It is stored encrypted with Windows DPAPI for your user account only." />
+            <DockPanel>
+              <Button DockPanel.Dock="Right" Content="Test key" Command="{Binding TestKeyCommand}" IsEnabled="{Binding TestingKey, Converter={StaticResource InverseBool}}" Margin="8,0,0,0" />
+              <PasswordBox x:Name="ApiKeyBox" PasswordChanged="ApiKeyBox_OnPasswordChanged" />
+            </DockPanel>
+            <TextBlock Margin="0,6,0,0" Foreground="{StaticResource MutedTextBrush}" Visibility="{Binding HasStoredKey, Converter={StaticResource BoolToVisibility}}" Text="A key is stored. Leave the box empty to keep it, or paste a new one to replace it." />
+            <TextBlock Text="{Binding TestKeyStatus}" Margin="0,6,0,0" TextWrapping="Wrap" />
+            <TextBlock Text="Models" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="170" />
+                <ColumnDefinition Width="*" />
+              </Grid.ColumnDefinitions>
+              <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+              </Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="Speech model" VerticalAlignment="Center" />
+              <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding SpeechModels}" SelectedItem="{Binding SpeechModel}" Margin="0,3" />
+              <TextBlock Grid.Row="1" Grid.Column="0" Text="Cleanup model" VerticalAlignment="Center" />
+              <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding LlmModel, UpdateSourceTrigger=PropertyChanged}" Margin="0,3" />
+              <TextBlock Grid.Row="2" Grid.Column="0" Text="Fallback models" VerticalAlignment="Center" />
+              <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding LlmFallbackModels, UpdateSourceTrigger=PropertyChanged}" Margin="0,3" />
+            </Grid>
+            <TextBlock Style="{StaticResource Hint}" Text="universal-3-5-pro (~$0.45/h) supports the personal dictionary and formatted turns; universal-streaming (~$0.15/h) is cheaper. Cleanup models are tried in order; any ID from GET /v1/models on the LLM Gateway works." />
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- Hotkey -->
+      <TabItem Header="Hotkey">
+        <StackPanel Style="{StaticResource Tab}">
+          <TextBlock Text="Dictation chord" Style="{StaticResource Heading}" />
+          <TextBlock Style="{StaticResource Hint}" Text="Click the box and press up to three keys together. Names such as Ctrl+Win, Ctrl+Alt, CapsLock or F8 can also be typed." />
+          <DockPanel>
+            <Button DockPanel.Dock="Right" Content="Ctrl+Alt" Command="{Binding UseAlternativeChordCommand}" Margin="8,0,0,0" />
+            <Button DockPanel.Dock="Right" Content="Ctrl+Win (default)" Command="{Binding UseDefaultChordCommand}" Margin="8,0,0,0" />
+            <TextBox x:Name="ChordBox" Text="{Binding HotkeyText, UpdateSourceTrigger=PropertyChanged}" PreviewKeyDown="ChordBox_OnPreviewKeyDown" PreviewKeyUp="ChordBox_OnPreviewKeyUp" FontFamily="Consolas" FontSize="14" />
+          </DockPanel>
+          <TextBlock Text="{Binding HotkeyError}" Foreground="{StaticResource RecordingBrush}" Margin="0,6,0,0" />
+          <TextBlock Text="Mode" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <RadioButton Content="Hold to talk: hold the chord, speak, release" IsChecked="{Binding HotkeyMode, Converter={StaticResource EnumToBool}, ConverterParameter=Hold}" />
+          <RadioButton Content="Double-tap to toggle: tap twice to start, tap once to stop" IsChecked="{Binding HotkeyMode, Converter={StaticResource EnumToBool}, ConverterParameter=DoubleTapToggle}" />
+          <TextBlock Text="Advanced" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <CheckBox Content="Accept injected (synthetic) key events as real keys (for automation and testing)" IsChecked="{Binding AcceptInjectedKeys}" />
+          <TextBlock Style="{StaticResource Hint}" Text="While the chord is held, Escape discards the dictation, ←/→ change the tone and ↑/↓ the cleanup level. Other keys are swallowed so Win+Ctrl shortcuts cannot fire mid-dictation." />
+        </StackPanel>
+      </TabItem>
+
+      <!-- Audio -->
+      <TabItem Header="Audio">
+        <StackPanel Style="{StaticResource Tab}">
+          <TextBlock Text="Microphone" Style="{StaticResource Heading}" />
+          <ComboBox ItemsSource="{Binding Microphones}" SelectedValue="{Binding SelectedMicrophoneId}" SelectedValuePath="Id" DisplayMemberPath="Name" />
+          <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+            <Button Content="{Binding MicTestRunning, Converter={StaticResource MicTestLabel}}" Command="{Binding TestMicrophoneCommand}" />
+            <Border Width="220" Height="10" CornerRadius="5" Background="{StaticResource SurfaceAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" VerticalAlignment="Center">
+              <Border HorizontalAlignment="Left" CornerRadius="5" Background="{StaticResource AccentBrush}" Width="{Binding MicLevel, Converter={StaticResource LevelToWidth}, ConverterParameter=218}" />
+            </Border>
+            <TextBlock Text="{Binding MicTestStatus}" VerticalAlignment="Center" Margin="10,0,0,0" />
+          </StackPanel>
+          <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0" Text="Audio is captured in shared mode and converted to 16 kHz mono before streaming, so any device works. If the meter stays flat, check Settings > Privacy > Microphone in Windows." />
+        </StackPanel>
+      </TabItem>
+
+      <!-- Style -->
+      <TabItem Header="Style">
+        <StackPanel Style="{StaticResource Tab}">
+          <TextBlock Text="Default tone" Style="{StaticResource Heading}" />
+          <StackPanel Orientation="Horizontal">
+            <RadioButton Content="Neutral" IsChecked="{Binding DefaultTone, Converter={StaticResource EnumToBool}, ConverterParameter=Neutral}" />
+            <RadioButton Content="Formal" IsChecked="{Binding DefaultTone, Converter={StaticResource EnumToBool}, ConverterParameter=Formal}" />
+            <RadioButton Content="Casual" IsChecked="{Binding DefaultTone, Converter={StaticResource EnumToBool}, ConverterParameter=Casual}" />
+          </StackPanel>
+          <TextBlock Text="Default cleanup level" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <RadioButton Content="None: spoken commands only, no AI call" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=None}" />
+          <RadioButton Content="Light: remove fillers and false starts, fix punctuation" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=Light}" />
+          <RadioButton Content="Medium: also fix grammar and split run-on sentences" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=Medium}" />
+          <RadioButton Content="High: also tighten wording and add paragraphs" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=High}" />
+          <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0" Text="App rules override these per application. None + Neutral never calls the LLM. If the LLM is unavailable the raw transcript is inserted and the Flow bar shows 'cleanup skipped'." />
+        </StackPanel>
+      </TabItem>
+
+      <!-- Dictionary -->
+      <TabItem Header="Dictionary">
+        <DockPanel Margin="18,14">
+          <TextBlock DockPanel.Dock="Top" Text="Personal dictionary" Style="{StaticResource Heading}" />
+          <TextBlock DockPanel.Dock="Top" Style="{StaticResource Hint}" Text="Names, acronyms and drug names are sent to AssemblyAI as keyterms (up to 100, starred first) and to the cleanup model as spellings to preserve." />
+          <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+            <Button DockPanel.Dock="Right" Content="Add" Command="{Binding AddTermCommand}" Margin="8,0,0,0" />
+            <TextBox Text="{Binding NewTerm, UpdateSourceTrigger=PropertyChanged}" KeyDown="NewTerm_OnKeyDown" />
+          </DockPanel>
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button Content="Remove selected" Command="{Binding RemoveTermCommand}" CommandParameter="{Binding SelectedTerm}" />
+            <Button Content="Correct last dictation…" Click="CorrectLast_OnClick" />
+          </StackPanel>
+          <DataGrid ItemsSource="{Binding Dictionary}" SelectedItem="{Binding SelectedTerm}">
+            <DataGrid.Columns>
+              <DataGridCheckBoxColumn Header="★" Binding="{Binding Starred, UpdateSourceTrigger=PropertyChanged}" Width="40" />
+              <DataGridTextColumn Header="Term" Binding="{Binding Term}" Width="*" />
+              <DataGridTextColumn Header="Used" Binding="{Binding UseCount}" IsReadOnly="True" Width="60" />
+              <DataGridTextColumn Header="Added" Binding="{Binding AddedAt, StringFormat=d}" IsReadOnly="True" Width="100" />
+            </DataGrid.Columns>
+          </DataGrid>
+        </DockPanel>
+      </TabItem>
+
+      <!-- App rules -->
+      <TabItem Header="App rules">
+        <DockPanel Margin="18,14">
+          <TextBlock DockPanel.Dock="Top" Text="Per-application defaults" Style="{StaticResource Heading}" />
+          <TextBlock DockPanel.Dock="Top" Style="{StaticResource Hint}" Text="Match by process name (wildcards * and ?) or by browser tab host. A URL rule beats a process rule; the first match of each kind wins. Empty tone/level cells inherit the defaults." />
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
+            <Button Content="Add rule" Command="{Binding AddRuleCommand}" />
+            <Button Content="Remove selected" Command="{Binding RemoveRuleCommand}" CommandParameter="{Binding SelectedRule}" />
+            <Button Content="Reset to defaults" Command="{Binding ResetRulesCommand}" />
+          </StackPanel>
+          <DataGrid ItemsSource="{Binding AppRules}" SelectedItem="{Binding SelectedRule}">
+            <DataGrid.Columns>
+              <DataGridCheckBoxColumn Header="On" Binding="{Binding Enabled, UpdateSourceTrigger=PropertyChanged}" Width="40" />
+              <DataGridTextColumn Header="Process" Binding="{Binding ProcessGlob}" Width="110" />
+              <DataGridTextColumn Header="URL host" Binding="{Binding UrlHost}" Width="140" />
+              <DataGridComboBoxColumn Header="Tone" SelectedItemBinding="{Binding Tone}" Width="80" x:Name="ToneColumn" />
+              <DataGridComboBoxColumn Header="Cleanup" SelectedItemBinding="{Binding Level}" Width="80" x:Name="LevelColumn" />
+              <DataGridComboBoxColumn Header="Paste" SelectedItemBinding="{Binding PasteMode}" Width="90" x:Name="PasteColumn" />
+              <DataGridTextColumn Header="Hint for the AI" Binding="{Binding Hint}" Width="*" />
+            </DataGrid.Columns>
+          </DataGrid>
+        </DockPanel>
+      </TabItem>
+
+      <!-- History & privacy -->
+      <TabItem Header="History &amp; privacy">
+        <StackPanel Style="{StaticResource Tab}">
+          <TextBlock Text="Audio" Style="{StaticResource Heading}" />
+          <CheckBox Content="Store the audio of each dictation (WAV, 16 kHz mono) for playback and retry" IsChecked="{Binding StoreAudio}" />
+          <TextBlock Text="Retention" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <Grid>
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="170" />
+              <ColumnDefinition Width="220" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto" />
+              <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Keep dictation text for" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding RetentionPolicies}" SelectedItem="{Binding HistoryRetention}" Margin="0,3" />
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="Keep audio for" VerticalAlignment="Center" />
+            <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding RetentionPolicies}" SelectedItem="{Binding AudioRetention}" Margin="0,3" />
+          </Grid>
+          <TextBlock Style="{StaticResource Hint}" Text="Hours24 = 24 hours, Days14 = two weeks, Forever = never purge. Retention runs at startup and hourly." />
+          <TextBlock Text="Data" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <StackPanel Orientation="Horizontal">
+            <Button Content="Open data folder" Command="{Binding OpenDataFolderCommand}" />
+            <Button Content="Delete all history…" Command="{Binding DeleteAllHistoryCommand}" />
+          </StackPanel>
+          <TextBlock Text="{Binding HistoryStatus}" Margin="0,8,0,0" />
+          <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0" Text="Nothing leaves your machine except audio sent to AssemblyAI for transcription and the transcript sent to the LLM Gateway for cleanup." />
+        </StackPanel>
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>
