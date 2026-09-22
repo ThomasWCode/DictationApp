@@ -1,0 +1,57 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{D3276B50-D801-4A63-9B54-C3A0D5C67D8B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DictationApp.Core", "src\DictationApp.Core\DictationApp.Core.csproj", "{721A2BF8-233F-4A17-860A-00026962E489}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DictationApp.Windows", "src\DictationApp.Windows\DictationApp.Windows.csproj", "{742FAA0B-261C-4F40-B583-869626F52400}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DictationApp", "src\DictationApp\DictationApp.csproj", "{3BB13516-AF87-45D3-8D77-1CF421792585}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{9025E74E-7CDE-4F18-B1E3-A57EEAE35A3D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DictationApp.Core.Tests", "tests\DictationApp.Core.Tests\DictationApp.Core.Tests.csproj", "{885054C6-386D-48C0-A52A-00FCBE19C055}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DictationApp.Windows.Tests", "tests\DictationApp.Windows.Tests\DictationApp.Windows.Tests.csproj", "{69ADF626-3377-4CE1-9AEE-E0FCE1972EEB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{721A2BF8-233F-4A17-860A-00026962E489}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{721A2BF8-233F-4A17-860A-00026962E489}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{721A2BF8-233F-4A17-860A-00026962E489}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{721A2BF8-233F-4A17-860A-00026962E489}.Release|Any CPU.Build.0 = Release|Any CPU
+		{742FAA0B-261C-4F40-B583-869626F52400}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{742FAA0B-261C-4F40-B583-869626F52400}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{742FAA0B-261C-4F40-B583-869626F52400}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{742FAA0B-261C-4F40-B583-869626F52400}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3BB13516-AF87-45D3-8D77-1CF421792585}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3BB13516-AF87-45D3-8D77-1CF421792585}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3BB13516-AF87-45D3-8D77-1CF421792585}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3BB13516-AF87-45D3-8D77-1CF421792585}.Release|Any CPU.Build.0 = Release|Any CPU
+		{885054C6-386D-48C0-A52A-00FCBE19C055}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{885054C6-386D-48C0-A52A-00FCBE19C055}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{885054C6-386D-48C0-A52A-00FCBE19C055}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{885054C6-386D-48C0-A52A-00FCBE19C055}.Release|Any CPU.Build.0 = Release|Any CPU
+		{69ADF626-3377-4CE1-9AEE-E0FCE1972EEB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{69ADF626-3377-4CE1-9AEE-E0FCE1972EEB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{69ADF626-3377-4CE1-9AEE-E0FCE1972EEB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{69ADF626-3377-4CE1-9AEE-E0FCE1972EEB}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{721A2BF8-233F-4A17-860A-00026962E489} = {D3276B50-D801-4A63-9B54-C3A0D5C67D8B}
+		{742FAA0B-261C-4F40-B583-869626F52400} = {D3276B50-D801-4A63-9B54-C3A0D5C67D8B}
+		{3BB13516-AF87-45D3-8D77-1CF421792585} = {D3276B50-D801-4A63-9B54-C3A0D5C67D8B}
+		{885054C6-386D-48C0-A52A-00FCBE19C055} = {9025E74E-7CDE-4F18-B1E3-A57EEAE35A3D}
+		{69ADF626-3377-4CE1-9AEE-E0FCE1972EEB} = {9025E74E-7CDE-4F18-B1E3-A57EEAE35A3D}
+	EndGlobalSection
+EndGlobal

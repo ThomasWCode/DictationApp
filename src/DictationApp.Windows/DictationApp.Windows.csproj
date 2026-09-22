@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>DictationApp.Windows</RootNamespace>
+    <UseWPF>true</UseWPF>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>Win32, UI Automation, WASAPI and clipboard adapters for DictationApp.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\DictationApp.Core\DictationApp.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="NAudio" />
+    <PackageReference Include="FlaUI.UIA3" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DictationApp.Windows.Tests" />
+  </ItemGroup>
+</Project>

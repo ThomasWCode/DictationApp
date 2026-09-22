@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  windows:
+    name: Build, test and publish (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Restore
+        run: dotnet restore DictationApp.sln
+      - name: Build
+        run: dotnet build DictationApp.sln --no-restore -c Release
+      - name: Test (Core)
+        run: dotnet test tests/DictationApp.Core.Tests --no-build -c Release --logger "trx;LogFileName=core.trx"
+      - name: Test (Windows, non-interactive)
+        run: dotnet test tests/DictationApp.Windows.Tests --no-build -c Release --filter "Category!=Interactive" --logger "trx;LogFileName=windows.trx"
+      - name: Publish app
+        run: dotnet publish src/DictationApp/DictationApp.csproj -c Release -r win-x64 --self-contained false -o artifacts/publish
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DictationApp-win-x64
+          path: artifacts/publish
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-windows
+          path: "**/*.trx"
+
+  ubuntu:
+    name: Build and test Core (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build Core
+        run: dotnet build src/DictationApp.Core/DictationApp.Core.csproj -c Release
+      - name: Test Core
+        run: dotnet test tests/DictationApp.Core.Tests -c Release
