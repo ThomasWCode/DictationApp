@@ -44,6 +44,61 @@ public class SpokenCommandNormaliserTests
     }
 }
 
+public class ListFormatterTests
+{
+    [Fact]
+    public void Numeric_markers_become_a_numbered_list()
+    {
+        var input = "Three things to do. 1. Buy milk. 2. Call mum. 3. Write the report.";
+        Assert.Equal("Three things to do.\n1. Buy milk.\n2. Call mum.\n3. Write the report.", ListFormatter.Format(input));
+    }
+
+    [Fact]
+    public void Spoken_number_words_become_a_numbered_list_and_joiners_are_dropped()
+    {
+        var input = "shopping list number one buy milk and number two call mum, then number three write the report";
+        Assert.Equal("shopping list\n1. buy milk\n2. call mum\n3. write the report", ListFormatter.Format(input));
+    }
+
+    [Theory]
+    [InlineData("version 1.2 is out and 3.4 follows")]
+    [InlineData("my number one priority is sleep")]
+    [InlineData("I have 2. They have 3.")]
+    [InlineData("point one five percent")]
+    public void Prose_with_numbers_is_left_alone(string input)
+    {
+        Assert.Equal(input, ListFormatter.Format(input));
+    }
+
+    [Fact]
+    public void Requires_a_run_starting_at_one()
+    {
+        Assert.Equal("see 2. and 3. below", ListFormatter.Format("see 2. and 3. below"));
+    }
+
+    [Fact]
+    public void Works_through_the_normaliser_with_capitalisation()
+    {
+        var input = "to do period number one buy milk number two call mum";
+        Assert.Equal("To do.\n1. Buy milk\n2. Call mum", SpokenCommandNormaliser.Normalise(input));
+    }
+
+    [Fact]
+    public void Parenthesis_and_colon_markers_are_accepted()
+    {
+        Assert.Equal("Steps\n1. open\n2. close", ListFormatter.Format("Steps 1) open 2) close"));
+        Assert.Equal("1. first\n2. second", ListFormatter.Format("1: first 2: second"));
+    }
+
+    [Fact]
+    public void Prompt_mentions_list_formatting()
+    {
+        var prompt = PromptBuilder.BuildSystemPrompt(new PromptContext(CleanupLevel.Light, Tone.Neutral, [], "app", null, null));
+        Assert.Contains("numbered list", prompt);
+        Assert.Contains("one item per line", prompt);
+    }
+}
+
 public class PromptBuilderTests
 {
     private static PromptContext Ctx(CleanupLevel level = CleanupLevel.Light, Tone tone = Tone.Neutral, params string[] terms) =>

@@ -12,8 +12,12 @@ public sealed class AppPaths
         LogDirectory = Path.Combine(root, "logs");
     }
 
+    /// <summary>
+    /// <c>%LOCALAPPDATA%\ThomasWCode\DictationApp</c>. Deliberately not <c>%LOCALAPPDATA%\DictationApp</c>,
+    /// which is where the Velopack installer puts the program files and which an uninstall removes.
+    /// </summary>
     public static AppPaths Default { get; } = new(
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DictationApp"));
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ThomasWCode", "DictationApp"));
 
     public string Root { get; }
 

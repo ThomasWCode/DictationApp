@@ -26,7 +26,7 @@
         <PasswordBox x:Name="KeyBox" PasswordChanged="KeyBox_OnPasswordChanged" />
       </DockPanel>
       <TextBlock Text="{Binding KeyStatus}" Margin="0,8,0,0" TextWrapping="Wrap" />
-      <TextBlock Style="{StaticResource Hint}" Margin="0,16,0,0" Text="The key is stored encrypted with Windows DPAPI in %LOCALAPPDATA%\DictationApp\settings.json. You can also set the ASSEMBLYAI_API_KEY environment variable instead." />
+      <TextBlock Style="{StaticResource Hint}" Margin="0,16,0,0" Text="The key is stored encrypted with Windows DPAPI in %LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json. You can also set the ASSEMBLYAI_API_KEY environment variable instead." />
     </StackPanel>
 
     <!-- Step 1: microphone -->
