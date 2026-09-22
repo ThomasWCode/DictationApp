@@ -73,6 +73,15 @@ Choices made while building, with the reasoning, including the places where the 
   without the input lock), which is why the inserter attaches to the foreground thread's input queue before
   refocusing the captured target.
 
+## Changes requested after the first delivery (2026-09-22)
+
+| Request | Decision | Why |
+|---|---|---|
+| "Remember the previous formality and cleanup settings from last time" | A tone/level change made during a dictation is persisted immediately: it updates the app rule that matched, or the global defaults when none did. Setting `RememberStyleChanges` (default on) restores the plan's one-dictation behaviour. | Updating the matched rule keeps the app-aware model intact: choosing Casual in Outlook does not turn every other app casual. Persisting at override time rather than at the end means an Escape still keeps the choice, which matches "remember what I set". |
+| "Write lists when the transcription says 1… 2… 3…" | Two layers: the LLM prompt now asks for numbered or bulleted lists for enumerations, and `ListFormatter` in the regex path turns unambiguous markers ("1." / "1)" / "number one" / "point one", at least two in ascending order from 1) into one item per line. | The user's account has no LLM Gateway access today, so the regex layer is what actually runs for them. It is deliberately conservative: ordinal words ("firstly, secondly") are left to the LLM because they are common in prose. |
+| "It should run in the background automatically from boot" | `Autostart` defaults to true and an installed build rewrites its Run key on every start. The app is delivered as a Velopack `Setup.exe` and installed for the user. | Rewriting on every start survives updates that move the executable and repairs a deleted key. Development builds are excluded so a `dotnet run` never registers a `bin\` path. |
+| Data location | Moved from `%LOCALAPPDATA%\DictationApp` to `%LOCALAPPDATA%\ThomasWCode\DictationApp`. | Velopack installs the program into `%LOCALAPPDATA%\DictationApp` and deletes that folder on uninstall; history, audio and the encrypted key must not live there. |
+
 ## Scope changes
 
 - 2026-09-22: the Android companion app was dropped at the user's request; only the Windows app is delivered.

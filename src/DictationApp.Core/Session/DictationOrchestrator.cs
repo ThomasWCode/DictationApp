@@ -321,6 +321,7 @@ public sealed class DictationOrchestrator : BackgroundService
                     }
 
                     PublishSession(s, _machine.State, null);
+                    RememberStyle(s);
                 }
 
                 break;
@@ -329,6 +330,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 {
                     ts.Tone = tone;
                     PublishSession(ts, _machine.State, null);
+                    RememberStyle(ts);
                 }
 
                 break;
@@ -337,6 +339,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 {
                     ls.Level = level;
                     PublishSession(ls, _machine.State, null);
+                    RememberStyle(ls);
                 }
 
                 break;
@@ -850,6 +853,56 @@ public sealed class DictationOrchestrator : BackgroundService
         {
             _ = s.PushKeytermsAsync(KeytermsSelector.Select(settings.Dictionary), _logger);
         }
+
+        if (_machine.IsIdle)
+        {
+            PublishIdle(_hub.Current.Badge);
+        }
+    }
+
+    /// <summary>
+    /// Persists a tone/level change so the next dictation in the same context starts from it: the matched
+    /// app rule is updated, or the global defaults when no rule matched. Off when RememberStyleChanges is false.
+    /// </summary>
+    private void RememberStyle(DictationSession session)
+    {
+        if (!_settings.Current.RememberStyleChanges)
+        {
+            return;
+        }
+
+        var tone = session.Tone;
+        var level = session.Level;
+        var matched = session.Rule.MatchedRule;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _settings.UpdateAsync(s =>
+                {
+                    var rule = matched is null
+                        ? null
+                        : s.AppRules.FirstOrDefault(r =>
+                            string.Equals(r.ProcessGlob, matched.ProcessGlob, StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(r.UrlHost, matched.UrlHost, StringComparison.OrdinalIgnoreCase));
+                    if (rule is not null)
+                    {
+                        rule.Tone = tone;
+                        rule.Level = level;
+                    }
+                    else
+                    {
+                        s.DefaultTone = tone;
+                        s.DefaultCleanupLevel = level;
+                    }
+                }).ConfigureAwait(false);
+                _logger.LogInformation("Remembered tone={Tone} level={Level} for {Scope}", tone, level, matched?.DisplayTarget ?? "defaults");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Could not remember the style change");
+            }
+        });
     }
 
     private void OnChordDown() => _events.Writer.TryWrite(new ControlEvent(ControlKind.ChordDown));

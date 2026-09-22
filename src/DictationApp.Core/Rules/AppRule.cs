@@ -31,4 +31,5 @@ public sealed class AppRule
     public AppRule Clone() => (AppRule)MemberwiseClone();
 }
 
-public sealed record ResolvedRule(Tone Tone, CleanupLevel Level, PasteMode PasteMode, string? Hint, string MatchedBy);
+/// <param name="MatchedRule">The rule that decided tone/level (url rule, else process rule), or null for defaults.</param>
+public sealed record ResolvedRule(Tone Tone, CleanupLevel Level, PasteMode PasteMode, string? Hint, string MatchedBy, AppRule? MatchedRule = null);

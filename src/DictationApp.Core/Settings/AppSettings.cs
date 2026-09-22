@@ -7,7 +7,7 @@ using DictationApp.Core.Rules;
 
 namespace DictationApp.Core.Settings;
 
-/// <summary>Everything the user can configure. Serialised to <c>%LOCALAPPDATA%\DictationApp\settings.json</c>.</summary>
+/// <summary>Everything the user can configure. Serialised to <c>%LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json</c>.</summary>
 public sealed class AppSettings
 {
     public const string SpeechModelPro = "universal-3-5-pro";
@@ -43,7 +43,14 @@ public sealed class AppSettings
 
     public RetentionPolicy AudioRetention { get; set; } = RetentionPolicy.Days14;
 
-    public bool Autostart { get; set; }
+    /// <summary>Start with Windows. Installed builds register the Run key themselves when this is true.</summary>
+    public bool Autostart { get; set; } = true;
+
+    /// <summary>
+    /// When true, changing the tone or cleanup level during a dictation (arrow keys or chips) is remembered:
+    /// it updates the app rule that matched, or the global defaults when no rule matched.
+    /// </summary>
+    public bool RememberStyleChanges { get; set; } = true;
 
     public PasteMode PasteMode { get; set; } = PasteMode.CtrlV;
 
