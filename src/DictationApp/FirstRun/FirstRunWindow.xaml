@@ -1,0 +1,55 @@
+<Window x:Class="DictationApp.FirstRun.FirstRunWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:DictationApp.FirstRun"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=local:FirstRunViewModel}"
+        Title="Welcome to DictationApp" Width="560" Height="420" ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen" Style="{StaticResource AppWindow}">
+  <DockPanel Margin="24">
+    <DockPanel DockPanel.Dock="Bottom" Margin="0,16,0,0">
+      <Button DockPanel.Dock="Left" Content="Back" Command="{Binding BackCommand}" IsEnabled="{Binding IsStep0, Converter={StaticResource InverseBool}}" />
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+        <Button Content="Skip setup" Click="Skip_OnClick" />
+        <Button Content="{Binding NextLabel}" Command="{Binding NextCommand}" Style="{StaticResource PrimaryButton}" Margin="0" IsDefault="True" />
+      </StackPanel>
+    </DockPanel>
+
+    <!-- Step 0: API key -->
+    <StackPanel Visibility="{Binding IsStep0, Converter={StaticResource BoolToVisibility}}">
+      <TextBlock Text="Step 1 of 3 · AssemblyAI API key" Style="{StaticResource Heading}" />
+      <TextBlock Style="{StaticResource Hint}" Text="DictationApp streams your voice to AssemblyAI and, when enabled on your account, uses its LLM Gateway to tidy the text. One API key covers both. Create one at assemblyai.com and paste it here." />
+      <DockPanel>
+        <Button DockPanel.Dock="Right" Content="Test" Command="{Binding TestKeyCommand}" Margin="8,0,0,0" />
+        <PasswordBox x:Name="KeyBox" PasswordChanged="KeyBox_OnPasswordChanged" />
+      </DockPanel>
+      <TextBlock Text="{Binding KeyStatus}" Margin="0,8,0,0" TextWrapping="Wrap" />
+      <TextBlock Style="{StaticResource Hint}" Margin="0,16,0,0" Text="The key is stored encrypted with Windows DPAPI in %LOCALAPPDATA%\DictationApp\settings.json. You can also set the ASSEMBLYAI_API_KEY environment variable instead." />
+    </StackPanel>
+
+    <!-- Step 1: microphone -->
+    <StackPanel Visibility="{Binding IsStep1, Converter={StaticResource BoolToVisibility}}">
+      <TextBlock Text="Step 2 of 3 · Microphone" Style="{StaticResource Heading}" />
+      <TextBlock Style="{StaticResource Hint}" Text="Speak normally. The meter should move. If it stays flat, allow microphone access under Windows Settings > Privacy &amp; security > Microphone, or pick another device later in Settings > Audio." />
+      <Border Height="14" CornerRadius="7" Background="{StaticResource SurfaceAltBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Margin="0,8">
+        <Border HorizontalAlignment="Left" CornerRadius="7" Background="{StaticResource AccentBrush}" Width="{Binding MicLevel, Converter={StaticResource LevelToWidth}, ConverterParameter=500}" />
+      </Border>
+      <TextBlock Text="{Binding MicStatus}" />
+    </StackPanel>
+
+    <!-- Step 2: hotkey -->
+    <StackPanel Visibility="{Binding IsStep2, Converter={StaticResource BoolToVisibility}}">
+      <TextBlock Text="Step 3 of 3 · Hotkey" Style="{StaticResource Heading}" />
+      <TextBlock Style="{StaticResource Hint}" Text="Hold the chord, speak, release: the text lands wherever the cursor is. Ctrl+Win is the default (the Start menu stays closed while dictating). Prefer Ctrl+Alt if you rely on Win-key shortcuts." />
+      <StackPanel Orientation="Horizontal" Margin="0,4,0,8">
+        <Button Content="Ctrl+Win" Command="{Binding UseDefaultChordCommand}" />
+        <Button Content="Ctrl+Alt" Command="{Binding UseAlternativeChordCommand}" />
+        <TextBox Text="{Binding ChordText, UpdateSourceTrigger=PropertyChanged}" Width="160" FontFamily="Consolas" />
+      </StackPanel>
+      <TextBlock Text="{Binding HotkeyStatus}" FontWeight="SemiBold" />
+      <TextBlock Style="{StaticResource Hint}" Margin="0,16,0,0" Text="Afterwards DictationApp lives in the tray. Right-click the icon for Settings, History and the dictionary." />
+    </StackPanel>
+  </DockPanel>
+</Window>
