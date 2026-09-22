@@ -189,6 +189,52 @@ public sealed class JsonSettingsStoreTests : IDisposable
             Environment.SetEnvironmentVariable(SettingsApiKeyProvider.EnvironmentVariable, previous);
         }
     }
+
+    [Fact]
+    public void Groq_key_is_resolved_separately_from_the_assemblyai_key()
+    {
+        var store = Substitute.For<ISettingsStore>();
+        var secrets = Substitute.For<ISecretStore>();
+        store.Current.Returns(new AppSettings { ApiKeyProtected = "a", GroqApiKeyProtected = "g" });
+        secrets.Unprotect("a").Returns("assemblyai");
+        secrets.Unprotect("g").Returns("gsk_groq");
+        var provider = new SettingsApiKeyProvider(store, secrets);
+        Assert.Equal("assemblyai", provider.GetApiKey());
+        Assert.Equal("gsk_groq", provider.GetLlmApiKey());
+
+        var previous = Environment.GetEnvironmentVariable(SettingsApiKeyProvider.LlmEnvironmentVariable);
+        try
+        {
+            store.Current.Returns(new AppSettings());
+            Environment.SetEnvironmentVariable(SettingsApiKeyProvider.LlmEnvironmentVariable, "gsk_env");
+            Assert.Equal("gsk_env", provider.GetLlmApiKey());
+            Environment.SetEnvironmentVariable(SettingsApiKeyProvider.LlmEnvironmentVariable, null);
+            Assert.Null(provider.GetLlmApiKey());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SettingsApiKeyProvider.LlmEnvironmentVariable, previous);
+        }
+    }
+
+    [Fact]
+    public async Task Schema_v1_settings_migrate_to_groq_models()
+    {
+        Directory.CreateDirectory(_migrationDir);
+        var path = Path.Combine(_migrationDir, "settings.json");
+        await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 1, \"LlmModel\": \"gemini-2.5-flash-lite\", \"LlmFallbackModels\": [\"gemini-2.5-flash\"], \"ShowFlowBar\": false, \"HotkeyMode\": \"Hold\" }");
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+
+        Assert.Equal(2, store.Current.SchemaVersion);
+        Assert.Equal(AppSettings.DefaultLlmModel, store.Current.LlmModel);
+        Assert.Equal(AppSettings.DefaultLlmBaseUrl, store.Current.LlmBaseUrl);
+        Assert.Equal("openai/gpt-oss-120b", store.Current.LlmModel);
+        Assert.Contains("qwen/qwen3.8-27b", store.Current.LlmFallbackModels);
+        Assert.Equal(FlowBarMode.Full, store.Current.FlowBarMode); // unknown old members are ignored
+        Directory.Delete(_migrationDir, recursive: true);
+    }
+
+    private readonly string _migrationDir = Path.Combine(Path.GetTempPath(), "DictationAppTests", Guid.NewGuid().ToString("N"));
 }
 
 public class CostEstimatorTests
@@ -198,7 +244,7 @@ public class CostEstimatorTests
     {
         Assert.Equal(0.0075m, CostEstimator.SttCost("universal-3-5-pro", TimeSpan.FromMinutes(1)));
         Assert.Equal(0.0025m, CostEstimator.SttCost("universal-streaming", TimeSpan.FromMinutes(1)));
-        Assert.Equal(0.00014m, CostEstimator.LlmCost("gemini-2.5-flash-lite", 1000, 100));
+        Assert.Equal(0m, CostEstimator.LlmCost("qwen/qwen3.8-27b", 1000, 100)); // Groq free tier
         Assert.Equal(0m, CostEstimator.LlmCost("unknown-model", 1000, 100));
         Assert.Equal(0m, CostEstimator.LlmCost(null, 1000, 100));
     }

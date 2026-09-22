@@ -24,6 +24,7 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
 
     [ObservableProperty] private int _step;
     [ObservableProperty] private string _apiKey = string.Empty;
+    [ObservableProperty] private string _groqApiKey = string.Empty;
     [ObservableProperty] private string _keyStatus = string.Empty;
     [ObservableProperty] private bool _keyValid;
     [ObservableProperty] private float _micLevel;
@@ -143,7 +144,7 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
     {
         if (HotkeyChord.TryParse(value, out var chord))
         {
-            _hotkeys.Configure(chord, _store.Current.HotkeyMode);
+            _hotkeys.Configure(chord);
             HotkeyOk = false;
             HotkeyStatus = "Press and hold " + chord + " now…";
         }
@@ -200,12 +201,18 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
     {
         StopMic();
         var key = ApiKey.Trim();
+        var groqKey = GroqApiKey.Trim();
         var chord = HotkeyChord.TryParse(ChordText, out var c) ? c : HotkeyChord.Default;
         await _store.UpdateAsync(s =>
         {
             if (key.Length > 0)
             {
                 s.ApiKeyProtected = _secrets.Protect(key);
+            }
+
+            if (groqKey.Length > 0)
+            {
+                s.GroqApiKeyProtected = _secrets.Protect(groqKey);
             }
 
             s.Hotkey = chord.ToString();

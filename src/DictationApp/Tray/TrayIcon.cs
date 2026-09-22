@@ -24,6 +24,7 @@ public sealed class TrayIcon : IDisposable
     private System.Drawing.Icon? _drawingIcon;
     private MenuItem? _startStopItem;
     private MenuItem? _pauseItem;
+    private MenuItem? _restartToUpdateItem;
     private string? _pendingToastUri;
     private bool _dictating;
 
@@ -128,6 +129,22 @@ public sealed class TrayIcon : IDisposable
             var result = await updates.CheckNowAsync(CancellationToken.None);
             ShowToast("DictationApp", result, ToastKind.Info, null);
         }));
+        _restartToUpdateItem = Item("Restart to update", () =>
+        {
+            var updates = _services.GetRequiredService<UpdateCheckService>();
+            if (!updates.RestartToUpdate())
+            {
+                ShowToast("DictationApp", "Finish the current dictation first.", ToastKind.Warning, null);
+            }
+        });
+        _restartToUpdateItem.Visibility = Visibility.Collapsed;
+        menu.Items.Add(_restartToUpdateItem);
+        var updateService = _services.GetRequiredService<UpdateCheckService>();
+        updateService.PendingChanged += () => Application.Current?.Dispatcher.BeginInvoke(() =>
+        {
+            _restartToUpdateItem.Header = $"Restart to update to {updateService.PendingVersion}";
+            _restartToUpdateItem.Visibility = updateService.HasPendingUpdate ? Visibility.Visible : Visibility.Collapsed;
+        });
         menu.Items.Add(Item("Open logs folder", () => Shell.OpenLogsFolder()));
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("Quit", () => Application.Current.Shutdown()));

@@ -67,6 +67,21 @@ public sealed class JsonSettingsStore : ISettingsStore
         await SaveAsync(copy, ct).ConfigureAwait(false);
     }
 
+    /// <summary>Schema 1 files carried AssemblyAI LLM Gateway model IDs; cleanup now runs on Groq.</summary>
+    private AppSettings Migrate(AppSettings settings)
+    {
+        if (settings.SchemaVersion < 2)
+        {
+            settings.LlmBaseUrl = AppSettings.DefaultLlmBaseUrl;
+            settings.LlmModel = AppSettings.DefaultLlmModel;
+            settings.LlmFallbackModels = new AppSettings().LlmFallbackModels;
+            settings.SchemaVersion = 2;
+            _logger.LogInformation("Migrated settings to schema v2 (Groq cleanup models)");
+        }
+
+        return settings;
+    }
+
     private AppSettings Load()
     {
         if (!File.Exists(FilePath))
@@ -83,7 +98,7 @@ public sealed class JsonSettingsStore : ISettingsStore
                 throw new JsonException("settings.json deserialised to null");
             }
 
-            return settings;
+            return Migrate(settings);
         }
         catch (Exception ex) when (ex is JsonException or IOException)
         {

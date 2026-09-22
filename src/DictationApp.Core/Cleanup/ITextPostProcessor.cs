@@ -32,8 +32,8 @@ public sealed class PassthroughPostProcessor : ITextPostProcessor
         Task.FromResult(PostProcessResult.Passthrough(SpokenCommandNormaliser.Normalise(rawTranscript)));
 }
 
-/// <summary>Sends None+Neutral to the passthrough (no gateway call) and everything else to the LLM.</summary>
-public sealed class PostProcessorRouter(PassthroughPostProcessor passthrough, LlmGatewayPostProcessor llm) : ITextPostProcessor
+/// <summary>Sends None+Neutral to the passthrough (no network call) and everything else to the LLM.</summary>
+public sealed class PostProcessorRouter(PassthroughPostProcessor passthrough, LlmPostProcessor llm) : ITextPostProcessor
 {
     public static bool NeedsLlm(CleanupLevel level, Tone tone) => level != CleanupLevel.None || tone != Tone.Neutral;
 
