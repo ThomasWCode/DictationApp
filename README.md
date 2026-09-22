@@ -18,6 +18,14 @@ clipboard with a toast. Native .NET 8 + WPF, tray-resident, ~60 MB idle.
 Docs: [features](docs/features.md) · [implementation](docs/implementation.md) · [decisions](docs/decisions.md) ·
 [original plan](docs/PLAN.md) · [manual test checklist](docs/manual-test-checklist.md)
 
+## Install (no terminal needed)
+
+Download `DictationApp-win-Setup.exe` from the latest [GitHub Release](https://github.com/ThomasWCode/DictationApp/releases)
+and run it. It installs per-user into `%LOCALAPPDATA%\DictationApp`, starts the app in the tray, and registers
+it to start with Windows (Autostart is on by default and can be turned off in Settings › General). Updates are
+picked up from the same releases feed and applied on the next restart. The executable is unsigned, so
+SmartScreen may show "More info → Run anyway" the first time.
+
 ## Build and run
 
 ```powershell
@@ -29,8 +37,8 @@ dotnet run --project src/DictationApp
 ```
 
 First run opens a wizard for the API key, microphone and hotkey. The key is stored DPAPI-encrypted in
-`%LOCALAPPDATA%\DictationApp\settings.json`; alternatively set `ASSEMBLYAI_API_KEY`. Logs are in
-`%LOCALAPPDATA%\DictationApp\logs`, history in `history.db`, audio in `audio\`.
+`%LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json`; alternatively set `ASSEMBLYAI_API_KEY`. Logs are in
+`%LOCALAPPDATA%\ThomasWCode\DictationApp\logs`, history in `history.db`, audio in `audio\`.
 
 ### Command-line switches
 

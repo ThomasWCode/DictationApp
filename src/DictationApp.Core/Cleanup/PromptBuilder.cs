@@ -24,6 +24,10 @@ public static class PromptBuilder
         sb.AppendLine("3. Apply spoken formatting commands literally: \"new line\" -> line break; \"new paragraph\" -> blank");
         sb.AppendLine("   line; \"bullet point\" -> \"- \" item; \"period\", \"comma\", \"question mark\" -> punctuation;");
         sb.AppendLine("   \"scratch that\" -> drop the preceding clause. Keep existing line breaks and lists.");
+        sb.AppendLine("   When the speaker enumerates items (\"first... second... third\", \"number one... number two\",");
+        sb.AppendLine("   \"one... two... three\", \"point one\") or clearly dictates a list, output a numbered list");
+        sb.AppendLine("   (\"1. \", \"2. \") or a bullet list (\"- \") with one item per line and no other prose between");
+        sb.AppendLine("   items. Numbers that are merely mentioned inside a sentence stay in the sentence.");
         sb.Append("4. Preserve the exact spelling and capitalisation of these terms if present: ");
         sb.AppendLine(ctx.Keyterms.Count == 0 ? "(none)" : string.Join(", ", ctx.Keyterms));
         sb.Append("5. Cleanup level: ").AppendLine(LevelInstruction(ctx.Level));

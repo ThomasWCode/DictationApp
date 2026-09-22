@@ -270,7 +270,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task Arrow_keys_override_tone_and_level_for_this_dictation_only()
+    public async Task Arrow_keys_override_tone_and_level_and_are_remembered_as_defaults()
     {
         await StartAsync();
         _hotkey.PressChord();
@@ -289,7 +289,54 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         Assert.Equal(Tone.Formal, _post.LastRequest!.Tone);
         Assert.Equal(CleanupLevel.Medium, _post.LastRequest.Level);
         Assert.Equal(Tone.Formal, _history.Records[0].Tone);
-        Assert.Equal(Tone.Neutral, _hub.Current.Tone); // back to defaults
+
+        // No app rule matched "notepad", so the change becomes the new global default.
+        await WaitFor(() => _settings.Current.DefaultTone == Tone.Formal && _settings.Current.DefaultCleanupLevel == CleanupLevel.Medium, "remembered defaults");
+        await WaitFor(() => _hub.Current.Tone == Tone.Formal, "idle chips show remembered tone");
+    }
+
+    [Fact]
+    public async Task Style_changes_are_per_dictation_when_remembering_is_off()
+    {
+        await _settings.UpdateAsync(s => s.RememberStyleChanges = false);
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _hotkey.Arrow(ArrowDirection.Right);
+        await WaitFor(() => _hub.Current.Tone == Tone.Formal, "tone override");
+        _transcriber.RaiseTurn(0, "Text.", endOfTurn: true, formatted: true);
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+
+        Assert.Equal(Tone.Formal, _post.LastRequest!.Tone);
+        Assert.Equal(Tone.Neutral, _settings.Current.DefaultTone);
+        Assert.Equal(Tone.Neutral, _hub.Current.Tone);
+    }
+
+    [Fact]
+    public async Task Style_change_under_an_app_rule_updates_that_rule_not_the_defaults()
+    {
+        await _settings.UpdateAsync(s => s.AppRules = [new Core.Rules.AppRule { ProcessGlob = "notepad", Tone = Tone.Casual, Level = CleanupLevel.High }]);
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        await WaitFor(() => _hub.Current.Tone == Tone.Casual, "rule applied");
+        _hotkey.Arrow(ArrowDirection.Right); // Casual -> Neutral
+        await WaitFor(() => _hub.Current.Tone == Tone.Neutral, "tone override");
+        _transcriber.RaiseTurn(0, "Text.", endOfTurn: true, formatted: true);
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+
+        await WaitFor(() => _settings.Current.AppRules[0].Tone == Tone.Neutral, "rule updated");
+        Assert.Equal(CleanupLevel.High, _settings.Current.AppRules[0].Level);
+        Assert.Equal(Tone.Neutral, _settings.Current.DefaultTone);
+        Assert.Equal(CleanupLevel.Light, _settings.Current.DefaultCleanupLevel);
     }
 
     [Fact]

@@ -13,7 +13,8 @@ updates, Open logs folder, Quit). Double-clicking the tray icon opens History.
 | Short tap | A press shorter than 300 ms is cancelled before the streaming session begins, so it costs nothing. |
 | Start menu stays closed | When a chord containing Win fires, an unassigned virtual key (0xE8) is injected so Windows treats the Win press as part of a combination. Win alone still opens Start; Win+E, Win+D and friends work normally. |
 | Escape | Discards the current dictation: nothing is inserted or stored. |
-| Arrow keys while holding | ←/→ cycle the tone (Neutral → Formal → Casual), ↑/↓ cycle the cleanup level. The override applies to this dictation only. While the chord is held every other key is swallowed so Win+Ctrl+Left cannot switch virtual desktops mid-sentence. |
+| Arrow keys while holding | ←/→ cycle the tone (Neutral → Formal → Casual), ↑/↓ cycle the cleanup level. While the chord is held every other key is swallowed so Win+Ctrl+Left cannot switch virtual desktops mid-sentence. |
+| Remembered style | A tone or level change (arrow keys or chips) is remembered for next time: if an app rule applied, that rule is updated (change it in Teams, Teams remembers); otherwise it becomes the new default. Settings › Style › "Remember tone and cleanup changes" turns this off, making changes apply to one dictation only. |
 | 20-minute cap | A dictation is finalised automatically after 20 minutes (configurable 1–180). AssemblyAI bills per session second and caps sessions at 3 h. |
 | Flow bar | A dark pill at the bottom centre of the target window's monitor, never focusable (WS_EX_NOACTIVATE). Shows a pulsing dot while recording, the state (Listening, Finishing, Cleaning up, Inserting), a level meter, the live transcript, and tone/level chips that can be clicked with the mouse. It lingers for 1.8 s after a dictation to show "Nothing heard", "Discarded", "cleanup skipped" or "Failed". |
 | Chord pressed again while busy | Ignored; the bar flashes. |
@@ -55,6 +56,13 @@ content, answering questions or wrapping in quotes, and describes the spoken for
 Spoken commands (both in the LLM prompt and in the regex fallback): "new line", "new paragraph", "bullet
 point", "period"/"full stop", "comma", "question mark", "exclamation mark", "colon", "semicolon", "open/close
 paren", "scratch that" (drops the preceding clause).
+
+Lists: enumerations are written out as lists with one item per line. The LLM is told to turn "first…
+second… third", "number one… number two", "one… two… three" or any clearly dictated list into a numbered
+("1. ") or bulleted ("- ") list. The regex fallback (used for cleanup level None and whenever the LLM is
+unavailable) handles the unambiguous forms itself: "1." / "1)" / "1:" markers and the phrases "number one",
+"point one", "item one" (words or digits), provided at least two markers run 1, 2, 3… in order. Trailing
+"and" / "then" before the next item is dropped. "Version 1.2" and "my number one priority" stay as prose.
 
 Safety net: the gateway is given 4 s per model and 8 s in total across the fallback chain
 (`gemini-2.5-flash-lite` → `gemini-2.5-flash` → `claude-haiku-4-5-20251001` by default, editable). Output is
@@ -110,13 +118,16 @@ service purges at startup and hourly and also sweeps orphaned WAVs. "Store audio
 Tabs: **General** (Flow bar, autostart, update check, dictation cap, language codes), **API** (DPAPI-encrypted
 key, "Test key" reports streaming and LLM-gateway access separately, speech model, cleanup model and
 fallbacks), **Hotkey** (chord recorder, Hold vs double-tap, accept injected keys), **Audio** (device picker with
-live meter), **Style** (default tone and level), **Dictionary**, **App rules**, **History & privacy**.
+live meter), **Style** (default tone and level, remember changes), **Dictionary**, **App rules**, **History & privacy**.
 
 ## First run, autostart, updates
 
 - A three-step wizard (API key with test, microphone meter, hotkey test with a Ctrl+Alt alternative) runs on
   first start or when no key is configured.
-- Autostart writes a per-user Run key launching `DictationApp.exe --minimized`.
+- Autostart is on by default. An installed build re-registers the per-user Run key (launching
+  `DictationApp.exe --minimized`) every time it starts, so after installing once the app is simply there in the
+  tray after every sign-in; no terminal, no shortcut. Development builds only register when the Settings
+  checkbox is saved.
 - When installed through the Velopack `Setup.exe`, updates are checked daily against GitHub Releases,
   downloaded in the background and applied on the next restart; the tray menu can check on demand.
 
@@ -129,7 +140,7 @@ provider prices). No connection is kept warm while idle because sessions are bil
 
 ## Diagnostics
 
-- Logs: `%LOCALAPPDATA%\DictationApp\logs\dictation-YYYYMMDD.log` (14 days).
+- Logs: `%LOCALAPPDATA%\ThomasWCode\DictationApp\logs\dictation-YYYYMMDD.log` (14 days).
 - `DictationApp.exe --stream-test file.wav` streams a WAV through a real session and prints every turn.
 - `DictationApp.exe --simulate file.wav --delay 5` runs a full dictation with the WAV in place of the microphone.
 - Toasts link to `ms-settings:privacy-microphone` when the microphone is blocked or silent.
