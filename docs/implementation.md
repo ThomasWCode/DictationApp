@@ -228,17 +228,22 @@ delay expires, exactly like a real dictation. Focus a scratch document, not some
 
 ## Update walk-through (0.1.0 → 0.2.0)
 
-How an update actually flows, as exercised on 2026-09-22 with the installed 0.1.0:
+How an update actually flows, as exercised on 2026-09-22:
 
 1. `v0.2.0` was tagged; the release workflow packed `DictationApp-win-Setup.exe`, the full `.nupkg` and the
    `releases.win.json` feed and attached them to the GitHub Release.
-2. The installed 0.1.0 was run headlessly: `DictationApp.exe --check-updates --github-token <token> --apply-update`
-   (the token is needed only because the repository is private). Velopack read the feed, found 0.2.0,
-   downloaded the package into `%LOCALAPPDATA%\DictationApp\packages`, and `ApplyUpdatesAndRestart` swapped
-   `%LOCALAPPDATA%\DictationApp\current` and relaunched the app.
-3. The relaunched app logged version 0.2.0, re-registered its Run key, and read the same
-   `%LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json` as before: settings survive because they are not in
-   Velopack's folder.
+2. The installed 0.1.0 cannot read a private repository (it predates the token setting), so a build of this
+   same code versioned 0.1.9 was installed over it with `Setup.exe --silent`. The install-over kept
+   `settings.json` byte-identical.
+3. That 0.1.9 was run headlessly: `DictationApp.exe --check-updates --github-token <token> --apply-update`.
+   Velopack read the feed, found 0.2.0, downloaded the package into `%LOCALAPPDATA%\DictationApp\packages`,
+   and `ApplyUpdatesAndRestart` swapped `%LOCALAPPDATA%\DictationApp\current` and relaunched the app.
+4. The relaunched app logged version 0.2.0, re-registered its Run key, and read the same
+   `%LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json` (same SHA-256 as before): settings survive because
+   they are not in Velopack's folder. Its first automatic check 45 s later failed with a 404 because no GitHub
+   token was stored in Settings yet; that is the reminder to add one while the repository is private.
+
+Anyone still on 0.1.0 installs 0.2.0 once by running its `Setup.exe`; from then on the updater works.
 
 In the tray the same path is: "Check for updates…" (or the daily check) → toast "Version x downloaded" →
 "Restart to update to x" in the menu, or just quit/reboot and the next start is the new version.
