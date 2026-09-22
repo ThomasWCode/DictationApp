@@ -1,4 +1,6 @@
 using DictationApp.Core.Abstractions;
+using DictationApp.Core.Cleanup;
+using DictationApp.Core.Session;
 using DictationApp.Core.Settings;
 using DictationApp.Windows.Hotkey;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -9,6 +11,7 @@ namespace DictationApp.Windows.Tests;
 public sealed class HotkeyServiceTests : IDisposable
 {
     private readonly LowLevelKeyboardHook _hook = new(NullLogger<LowLevelKeyboardHook>.Instance);
+    private readonly DictationStatusHub _hub = new();
     private readonly HotkeyService _service;
     private readonly List<string> _events = [];
     private long _now = 100_000;
@@ -16,7 +19,7 @@ public sealed class HotkeyServiceTests : IDisposable
 
     public HotkeyServiceTests()
     {
-        _service = new HotkeyService(_hook, NullLogger<HotkeyService>.Instance)
+        _service = new HotkeyService(_hook, _hub, NullLogger<HotkeyService>.Instance)
         {
             SuppressWinKey = () => _winSuppressions++,
             Clock = () => _now,
@@ -51,6 +54,10 @@ public sealed class HotkeyServiceTests : IDisposable
         Key(HotkeyChord.VkLControl, false);
     }
 
+    /// <summary>What the orchestrator publishes: an active state or Idle.</summary>
+    private void Publish(DictationState state) =>
+        _hub.Publish(new DictationStatus(state, string.Empty, 0f, Tone.Neutral, CleanupLevel.Light, null, null, null, true));
+
     private async Task<string[]> EventsAsync()
     {
         await Task.Delay(60); // events are dispatched on a background consumer
@@ -58,6 +65,17 @@ public sealed class HotkeyServiceTests : IDisposable
         {
             return [.. _events];
         }
+    }
+
+    private void StartHandsFree()
+    {
+        Press(120);
+        Publish(DictationState.Arming);
+        Publish(DictationState.Idle);   // first tap cancelled
+        Advance(200);
+        Press(120);
+        Publish(DictationState.Arming);
+        Publish(DictationState.Recording);
     }
 
     [Fact]
@@ -88,9 +106,7 @@ public sealed class HotkeyServiceTests : IDisposable
     public async Task Double_tap_starts_hands_free_and_next_press_stops_it()
     {
         _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
-        Press(120);          // tap 1: down + up (cancelled by the orchestrator as a short press)
-        Advance(200);
-        Press(120);          // tap 2 within 400 ms: down, no up -> hands-free
+        StartHandsFree();
         Assert.Equal(["down", "up", "down"], await EventsAsync());
         Assert.True(_service.IsHandsFree);
         Assert.True(_service.IsChordHeld);
@@ -100,10 +116,69 @@ public sealed class HotkeyServiceTests : IDisposable
         Assert.Equal(["down", "up", "down", "up"], await EventsAsync());
         Assert.False(_service.IsHandsFree);
         Assert.False(_service.IsChordHeld);
+        Publish(DictationState.Finalising);
+        Publish(DictationState.Idle);
 
         Advance(2000);
         Press(120);          // a lone tap afterwards is just a tap again
         Assert.Equal(["down", "up", "down", "up", "down", "up"], await EventsAsync());
+    }
+
+    [Fact]
+    public async Task Escape_in_hands_free_ends_it_and_the_next_press_starts_a_new_dictation()
+    {
+        _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
+        StartHandsFree();
+        await EventsAsync();
+
+        Assert.True(Key(HotkeyChord.VkEscape, true));
+        Key(HotkeyChord.VkEscape, false);
+        Assert.False(_service.IsHandsFree);
+        Publish(DictationState.Idle);   // orchestrator discarded the session
+
+        Advance(1000);
+        Press(2000);                    // must be a fresh hold, not a swallowed "stop"
+        var events = await EventsAsync();
+        Assert.Equal(["down", "up", "down", "esc", "down", "up"], events);
+    }
+
+    [Fact]
+    public async Task Hands_free_session_ending_by_itself_re_arms_the_chord()
+    {
+        _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
+        StartHandsFree();
+        await EventsAsync();
+        Assert.True(_service.IsHandsFree);
+
+        // 20-minute cap or a network fault: the orchestrator finalises without any key press.
+        Publish(DictationState.Finalising);
+        Publish(DictationState.Idle);
+        Assert.False(_service.IsHandsFree);
+
+        Advance(1000);
+        Press(2000);
+        Assert.Equal(["down", "up", "down", "down", "up"], await EventsAsync());
+    }
+
+    [Fact]
+    public async Task Late_idle_from_the_cancelled_first_tap_does_not_clear_hands_free()
+    {
+        _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
+        Press(120);
+        Publish(DictationState.Arming);
+        Advance(200);
+        Press(120);                      // second tap: hands-free set before session 1 finished tearing down
+        Assert.True(_service.IsHandsFree);
+        Publish(DictationState.Idle);    // session 1's Idle arrives late
+        Assert.True(_service.IsHandsFree);
+        Publish(DictationState.Arming);  // session 2 starts
+        Publish(DictationState.Recording);
+        Assert.True(_service.IsHandsFree);
+
+        Advance(3000);
+        Press(80);                       // stops it
+        Assert.Equal(["down", "up", "down", "up"], await EventsAsync());
+        Assert.False(_service.IsHandsFree);
     }
 
     [Fact]
@@ -132,9 +207,7 @@ public sealed class HotkeyServiceTests : IDisposable
     public async Task Hands_free_swallows_only_escape_and_lets_other_keys_through()
     {
         _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
-        Press(120);
-        Advance(200);
-        Press(120);
+        StartHandsFree();
         await EventsAsync();
 
         Assert.False(Key('A', true));                 // typing passes through
