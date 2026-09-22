@@ -394,7 +394,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public bool Configured { get; private set; }
 
-        public void Configure(HotkeyChord chord, HotkeyMode mode) => Configured = true;
+        public void Configure(HotkeyChord chord) => Configured = true;
 
         public void PressChord()
         {
