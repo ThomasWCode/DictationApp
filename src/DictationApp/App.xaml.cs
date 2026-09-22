@@ -2,7 +2,11 @@ using System.Windows;
 using System.Windows.Threading;
 using DictationApp.Cli;
 using DictationApp.Core.Settings;
+using DictationApp.Dictionary;
+using DictationApp.FirstRun;
+using DictationApp.History;
 using DictationApp.Overlay;
+using DictationApp.Settings;
 using DictationApp.Tray;
 using DictationApp.Windows.Hotkey;
 using Microsoft.Extensions.DependencyInjection;
@@ -57,6 +61,12 @@ public partial class App : Application
             _host.Services.GetRequiredService<TrayIcon>().Show();
             _host.Services.GetRequiredService<FlowBarWindow>().Attach();
 
+            if (_options.Smoke)
+            {
+                RunSmokeTest();
+                return;
+            }
+
             var shell = _host.Services.GetRequiredService<Shell>();
             var needsSetup = !settings.Current.FirstRunCompleted || (!settings.Current.HasApiKey && string.IsNullOrEmpty(Environment.GetEnvironmentVariable(SettingsApiKeyProvider.EnvironmentVariable)));
             if (needsSetup && !_options.Minimized)
@@ -97,6 +107,46 @@ public partial class App : Application
             await Log.CloseAndFlushAsync();
             base.OnExit(e);
         }
+    }
+
+    /// <summary>
+    /// <c>--smoke</c>: construct, show and close every window so XAML parsing, bindings and DI wiring are
+    /// exercised without a user. Exit code 0 on success, 1 on any exception.
+    /// </summary>
+    private void RunSmokeTest()
+    {
+        var failures = 0;
+        foreach (var type in new[] { typeof(SettingsWindow), typeof(HistoryWindow), typeof(FirstRunWindow), typeof(CorrectionWindow) })
+        {
+            try
+            {
+                var window = (Window)_host!.Services.GetRequiredService(type);
+                window.Show();
+                window.Close();
+                _logger!.LogInformation("Smoke: {Window} OK", type.Name);
+            }
+            catch (Exception ex)
+            {
+                failures++;
+                _logger!.LogError(ex, "Smoke: {Window} FAILED", type.Name);
+            }
+        }
+
+        try
+        {
+            var bar = _host!.Services.GetRequiredService<FlowBarWindow>();
+            bar.Show();
+            bar.Hide();
+            _logger!.LogInformation("Smoke: FlowBarWindow OK");
+        }
+        catch (Exception ex)
+        {
+            failures++;
+            _logger!.LogError(ex, "Smoke: FlowBarWindow FAILED");
+        }
+
+        _logger!.LogInformation("Smoke test finished with {Failures} failure(s)", failures);
+        Shutdown(failures == 0 ? 0 : 1);
     }
 
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
