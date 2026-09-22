@@ -1,0 +1,43 @@
+<Window x:Class="DictationApp.Dictionary.CorrectionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:DictationApp.Dictionary"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=local:CorrectionViewModel}"
+        Title="Correct last dictation" Width="620" Height="480" MinWidth="480" MinHeight="380"
+        WindowStartupLocation="CenterScreen" Style="{StaticResource AppWindow}">
+  <DockPanel Margin="18">
+    <TextBlock DockPanel.Dock="Top" Text="{Binding Status}" Style="{StaticResource Hint}" />
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+      <Button Content="Find corrections" Command="{Binding FindCorrectionsCommand}" IsEnabled="{Binding HasRecord}" />
+      <Button Content="Add selected to dictionary" Command="{Binding AddSelectedCommand}" Style="{StaticResource PrimaryButton}" IsEnabled="{Binding HasRecord}" />
+      <Button Content="Close" IsCancel="True" Margin="0" />
+    </StackPanel>
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="2*" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="*" />
+      </Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Text="Edit the text so it reads exactly as you meant it" Style="{StaticResource Heading}" />
+      <TextBox Grid.Row="1" Text="{Binding EditedText, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" IsEnabled="{Binding HasRecord}" />
+      <TextBlock Grid.Row="2" Text="Candidate dictionary terms" Style="{StaticResource Heading}" Margin="0,12,0,8" />
+      <ListBox Grid.Row="3" ItemsSource="{Binding Candidates}" BorderBrush="{StaticResource BorderBrush}">
+        <ListBox.ItemTemplate>
+          <DataTemplate>
+            <CheckBox IsChecked="{Binding Selected}" Margin="0,2">
+              <TextBlock>
+                <Run Text="{Binding From, Mode=OneWay}" Foreground="{StaticResource MutedTextBrush}" TextDecorations="Strikethrough" />
+                <Run Text=" → " />
+                <Run Text="{Binding To, Mode=OneWay}" FontWeight="SemiBold" />
+              </TextBlock>
+            </CheckBox>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </Grid>
+  </DockPanel>
+</Window>

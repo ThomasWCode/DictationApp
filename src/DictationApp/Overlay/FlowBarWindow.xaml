@@ -1,0 +1,127 @@
+<Window x:Class="DictationApp.Overlay.FlowBarWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:overlay="clr-namespace:DictationApp.Overlay"
+        xmlns:cleanup="clr-namespace:DictationApp.Core.Cleanup;assembly=DictationApp.Core"
+        Title="DictationApp Flow bar"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Topmost="True" ShowInTaskbar="False" ShowActivated="False" Focusable="False"
+        ResizeMode="NoResize" SizeToContent="WidthAndHeight"
+        FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True"
+        d:DataContext="{d:DesignInstance Type=overlay:FlowBarViewModel}"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d">
+  <Window.Resources>
+    <Style x:Key="Chip" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Padding" Value="8,2" />
+      <Setter Property="MinHeight" Value="22" />
+      <Setter Property="Margin" Value="0,0,4,0" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Background" Value="#33FFFFFF" />
+      <Setter Property="BorderBrush" Value="#44FFFFFF" />
+      <Setter Property="Foreground" Value="{StaticResource BarTextBrush}" />
+      <Setter Property="Focusable" Value="False" />
+    </Style>
+    <Style x:Key="ChipSelected" TargetType="Button" BasedOn="{StaticResource Chip}">
+      <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+      <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+  </Window.Resources>
+  <Border x:Name="Root" Background="{StaticResource BarBackgroundBrush}" CornerRadius="14" Padding="16,10" Margin="12"
+          BorderThickness="1.5" BorderBrush="#33FFFFFF" MinWidth="360" MaxWidth="720">
+    <Border.Effect>
+      <DropShadowEffect BlurRadius="18" ShadowDepth="2" Opacity="0.45" />
+    </Border.Effect>
+    <Grid>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+
+      <!-- Row 0: state dot, state text, level meter -->
+      <DockPanel Grid.Row="0" LastChildFill="True">
+        <Ellipse x:Name="Dot" DockPanel.Dock="Left" Width="10" Height="10" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource RecordingBrush}" />
+        <TextBlock DockPanel.Dock="Left" Text="{Binding StateText}" Foreground="{StaticResource BarTextBrush}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,0" />
+        <Border DockPanel.Dock="Right" Width="90" Height="6" CornerRadius="3" Background="#22FFFFFF" VerticalAlignment="Center" HorizontalAlignment="Right">
+          <Border HorizontalAlignment="Left" CornerRadius="3" Background="{StaticResource AccentBrush}" Width="{Binding Level, Converter={StaticResource LevelToWidth}, ConverterParameter=90}" />
+        </Border>
+        <TextBlock Text="" />
+      </DockPanel>
+
+      <!-- Row 1: live text -->
+      <TextBlock Grid.Row="1" Text="{Binding LiveText}" Foreground="{StaticResource BarTextBrush}" Opacity="0.92"
+                 TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" Margin="0,8,0,0" MaxWidth="680"
+                 Visibility="{Binding LiveText, Converter={StaticResource NullToVisibility}}" />
+
+      <!-- Row 2: chips -->
+      <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,8,0,0" Visibility="{Binding ChipsEnabled, Converter={StaticResource BoolToVisibility}}">
+        <TextBlock Text="Tone" Foreground="#99FFFFFF" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0" />
+        <ItemsControl ItemsSource="{Binding Tones}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <StackPanel Orientation="Horizontal" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Button Content="{Binding}" Command="{Binding DataContext.SetToneCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}">
+                <Button.Style>
+                  <Style TargetType="Button" BasedOn="{StaticResource Chip}">
+                    <Style.Triggers>
+                      <DataTrigger Value="True">
+                        <DataTrigger.Binding>
+                          <MultiBinding Converter="{StaticResource EqualsMulti}">
+                            <Binding />
+                            <Binding Path="DataContext.Tone" RelativeSource="{RelativeSource AncestorType=Window}" />
+                          </MultiBinding>
+                        </DataTrigger.Binding>
+                        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+                        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                        <Setter Property="FontWeight" Value="SemiBold" />
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Button.Style>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <TextBlock Text="Cleanup" Foreground="#99FFFFFF" FontSize="11" VerticalAlignment="Center" Margin="10,0,6,0" />
+        <ItemsControl ItemsSource="{Binding Levels}">
+          <ItemsControl.ItemsPanel>
+            <ItemsPanelTemplate>
+              <StackPanel Orientation="Horizontal" />
+            </ItemsPanelTemplate>
+          </ItemsControl.ItemsPanel>
+          <ItemsControl.ItemTemplate>
+            <DataTemplate>
+              <Button Content="{Binding}" Command="{Binding DataContext.SetLevelCommand, RelativeSource={RelativeSource AncestorType=Window}}" CommandParameter="{Binding}">
+                <Button.Style>
+                  <Style TargetType="Button" BasedOn="{StaticResource Chip}">
+                    <Style.Triggers>
+                      <DataTrigger Value="True">
+                        <DataTrigger.Binding>
+                          <MultiBinding Converter="{StaticResource EqualsMulti}">
+                            <Binding />
+                            <Binding Path="DataContext.CleanupLevel" RelativeSource="{RelativeSource AncestorType=Window}" />
+                          </MultiBinding>
+                        </DataTrigger.Binding>
+                        <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+                        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+                        <Setter Property="FontWeight" Value="SemiBold" />
+                      </DataTrigger>
+                    </Style.Triggers>
+                  </Style>
+                </Button.Style>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <TextBlock Text="  ←→ tone  ↑↓ cleanup  Esc discard" Foreground="#77FFFFFF" FontSize="11" VerticalAlignment="Center" Margin="8,0,0,0" />
+      </StackPanel>
+    </Grid>
+  </Border>
+</Window>
