@@ -17,7 +17,8 @@ public sealed record CommandLineOptions(
     bool Minimized,
     bool AcceptInjectedKeys,
     bool ShowSettings,
-    string? OutputFile = null)
+    string? OutputFile = null,
+    bool Smoke = false)
 {
     public bool IsCliMode => StreamTest is not null || Simulate is not null;
 
@@ -30,6 +31,7 @@ public sealed record CommandLineOptions(
         var injected = false;
         var showSettings = false;
         string? output = null;
+        var smoke = false;
         for (var i = 0; i < args.Length; i++)
         {
             switch (args[i].ToLowerInvariant())
@@ -56,10 +58,13 @@ public sealed record CommandLineOptions(
                 case "--output" when i + 1 < args.Length:
                     output = args[++i];
                     break;
+                case "--smoke":
+                    smoke = true;
+                    break;
             }
         }
 
-        return new CommandLineOptions(streamTest, simulate, delay, minimized, injected, showSettings, output);
+        return new CommandLineOptions(streamTest, simulate, delay, minimized, injected, showSettings, output, smoke);
     }
 }
 

@@ -41,6 +41,7 @@ First run opens a wizard for the API key, microphone and hotkey. The key is stor
 | `--settings` | Open Settings on start. |
 | `--minimized` | Used by the autostart entry; skips the first-run wizard. |
 | `--accept-injected-keys` | Treat synthetic key events as real (automation/testing). |
+| `--smoke` | Starts the tray app, constructs and closes every window (Settings, History, first-run, correction, Flow bar) and exits 0/1. Verifies XAML and DI wiring without a user. |
 
 A WAV for testing can be produced with Windows speech synthesis:
 

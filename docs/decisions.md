@@ -62,8 +62,16 @@ Choices made while building, with the reasoning, including the places where the 
 - **Connect latency ~960 ms** on this network; the shutdown handshake takes ~890 ms when no turn is open.
 - **A locked workstation blocks clipboard and foreground access** for every process (`OpenClipboard` fails,
   `GetForegroundWindow` is null). The `--simulate` run made during a locked session reached Inserting and then
-  recorded a Failed entry with the clipboard error, so the failure path was exercised too. Paste, clipboard
-  restore and foreground detection are covered by unit tests and the manual checklist.
+  recorded a Failed entry with the clipboard error, so the failure path was exercised too.
+- **On the unlocked desktop both insertion outcomes were verified live**: with no editable focus the text was
+  copied with the "No text box has focus" toast (record `CopiedOnly`); with a Notepad document focused, UIA
+  reported `Document`, the paste landed (record `Inserted`) and the clipboard was restored to its prior value.
+- **Windows 11 Notepad is single-instance and restores the selection state of unsaved tabs**, so a paste into it
+  replaces whatever is selected. `--simulate` targets the real foreground window; a scratch document is the
+  right target when testing.
+- **Window activation from a background process is refused by Windows** (`AppActivate`/`SetForegroundWindow`
+  without the input lock), which is why the inserter attaches to the foreground thread's input queue before
+  refocusing the captured target.
 
 ## Scope changes
 
