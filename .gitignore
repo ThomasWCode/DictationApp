@@ -1,1 +1,20 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.swp
+.vs/
+.vscode/
+TestResults/
+*.trx
+artifacts/
+publish/
+Releases/
+*.nupkg
+*.binlog
+launchSettings.json
 
+# OS
+Thumbs.db
+.DS_Store
