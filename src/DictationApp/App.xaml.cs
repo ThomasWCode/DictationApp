@@ -6,9 +6,11 @@ using DictationApp.Dictionary;
 using DictationApp.FirstRun;
 using DictationApp.History;
 using DictationApp.Overlay;
+using DictationApp.Services;
 using DictationApp.Settings;
 using DictationApp.Tray;
 using DictationApp.Windows.Hotkey;
+using DictationApp.Windows.Startup;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -60,6 +62,7 @@ public partial class App : Application
 
             _host.Services.GetRequiredService<TrayIcon>().Show();
             _host.Services.GetRequiredService<FlowBarWindow>().Attach();
+            EnsureAutostart(settings);
 
             if (_options.Smoke)
             {
@@ -106,6 +109,33 @@ public partial class App : Application
         {
             await Log.CloseAndFlushAsync();
             base.OnExit(e);
+        }
+    }
+
+    /// <summary>
+    /// Installed builds keep the per-user Run key pointing at themselves whenever Autostart is on, so a
+    /// fresh install (or an update that moved the executable) starts with Windows without any user action.
+    /// Development builds leave the key alone; the Settings checkbox still works for them.
+    /// </summary>
+    private void EnsureAutostart(ISettingsStore settings)
+    {
+        try
+        {
+            if (!settings.Current.Autostart || Environment.ProcessPath is not { } exe)
+            {
+                return;
+            }
+
+            var updates = _host!.Services.GetRequiredService<UpdateCheckService>();
+            if (updates.IsInstalled)
+            {
+                RunKeyAutostart.Set(true, exe);
+                _logger?.LogInformation("Autostart registered for {Path}", exe);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Could not register autostart");
         }
     }
 

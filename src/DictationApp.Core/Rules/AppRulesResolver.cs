@@ -42,7 +42,7 @@ public static class AppRulesResolver
         var paste = urlRule?.PasteMode ?? processRule?.PasteMode ?? defaultPaste;
         var hint = urlRule?.Hint ?? processRule?.Hint;
         var matchedBy = urlRule is not null ? $"url:{urlRule.UrlHost}" : processRule is not null ? $"process:{processRule.ProcessGlob}" : "default";
-        return new ResolvedRule(tone, level, paste, hint, matchedBy);
+        return new ResolvedRule(tone, level, paste, hint, matchedBy, urlRule ?? processRule);
     }
 
     /// <summary><c>mail.google.com</c> matches rule host <c>mail.google.com</c> or <c>google.com</c> (suffix on a label boundary).</summary>

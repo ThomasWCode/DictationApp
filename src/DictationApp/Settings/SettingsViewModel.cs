@@ -58,6 +58,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     // Style
     [ObservableProperty] private Tone _defaultTone;
     [ObservableProperty] private CleanupLevel _defaultCleanupLevel;
+    [ObservableProperty] private bool _rememberStyleChanges;
 
     // Dictionary
     [ObservableProperty] private string _newTerm = string.Empty;
@@ -132,6 +133,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         SelectedMicrophoneId = s.MicrophoneDeviceId ?? string.Empty;
         DefaultTone = s.DefaultTone;
         DefaultCleanupLevel = s.DefaultCleanupLevel;
+        RememberStyleChanges = s.RememberStyleChanges;
         StoreAudio = s.StoreAudio;
         HistoryRetention = s.HistoryRetention;
         AudioRetention = s.AudioRetention;
@@ -183,6 +185,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 s.MicrophoneDeviceId = string.IsNullOrEmpty(SelectedMicrophoneId) ? null : SelectedMicrophoneId;
                 s.DefaultTone = DefaultTone;
                 s.DefaultCleanupLevel = DefaultCleanupLevel;
+                s.RememberStyleChanges = RememberStyleChanges;
                 s.StoreAudio = StoreAudio;
                 s.HistoryRetention = HistoryRetention;
                 s.AudioRetention = AudioRetention;

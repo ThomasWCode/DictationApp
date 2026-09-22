@@ -141,6 +141,9 @@
           <RadioButton Content="Medium: also fix grammar and split run-on sentences" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=Medium}" />
           <RadioButton Content="High: also tighten wording and add paragraphs" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=High}" />
           <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0" Text="App rules override these per application. None + Neutral never calls the LLM. If the LLM is unavailable the raw transcript is inserted and the Flow bar shows 'cleanup skipped'." />
+          <TextBlock Text="Memory" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <CheckBox Content="Remember tone and cleanup changes made during a dictation (arrow keys or chips)" IsChecked="{Binding RememberStyleChanges}" />
+          <TextBlock Style="{StaticResource Hint}" Text="A change made while an app rule applied updates that rule; otherwise it becomes the new default above. Untick to make changes apply to one dictation only." />
         </StackPanel>
       </TabItem>
 

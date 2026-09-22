@@ -22,6 +22,7 @@ public static partial class SpokenCommandNormaliser
         s = NewLine().Replace(s, "\n");
         s = BulletPoint().Replace(s, "\n- ");
         s = Punctuation().Replace(s, static m => PunctuationFor(m.Groups[1].Value));
+        s = ListFormatter.Format(s);
         s = CollapseSpacesBeforePunctuation().Replace(s, "$1");
         s = SpaceAfterNewline().Replace(s, "\n");
         s = MultiSpace().Replace(s, " ");
