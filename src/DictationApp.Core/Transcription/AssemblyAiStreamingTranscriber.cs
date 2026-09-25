@@ -173,7 +173,7 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
         {
             _logger.LogInformation("Shutdown handshake hit the {Cap} ms hard cap", hardCap.TotalMilliseconds);
         }
-        catch (Exception ex) when (ex is WebSocketException or InvalidOperationException)
+        catch (Exception ex) when (ex is WebSocketException or InvalidOperationException or IOException)
         {
             _logger.LogWarning(ex, "Shutdown handshake failed");
             _failure ??= ex;
@@ -380,7 +380,13 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
     private void OnFault(Exception ex)
     {
         _logger.LogWarning(ex, "Streaming transcriber fault");
+        _failure ??= ex;
         _beginTcs.TrySetException(ex);
+
+        // A fault (e.g. a typed error frame) during the shutdown handshake must end it now, not after its waits
+        // time out; ShutdownAsync then reports the failure instead of returning a partial transcript as complete.
+        _endOfTurnTcs?.TrySetException(ex);
+        _terminationTcs.TrySetException(ex);
         Faulted?.Invoke(ex);
     }
 }

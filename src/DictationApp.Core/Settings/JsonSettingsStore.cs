@@ -92,12 +92,13 @@ public sealed class JsonSettingsStore : ISettingsStore
         }
 
         // Schema 3: app rules start empty and every app follows the Style defaults. The rules earlier versions
-        // seeded (Outlook formal, Teams casual, ...) are removed even if "Remember tone and cleanup changes" has
-        // since altered them; rules for any other app were added by the user and are kept.
+        // seeded (Outlook formal, Teams casual, ...) are removed, including ones whose tone or level "Remember tone
+        // and cleanup changes" altered on its own. A seeded rule whose paste mode, hint or on/off state the user
+        // changed is kept, as is every rule for another app.
         if (settings.SchemaVersion < 3)
         {
             var before = settings.AppRules.Count;
-            settings.AppRules = settings.AppRules.Where(r => !LegacyAppRules.IsSeededTarget(r)).ToList();
+            settings.AppRules = settings.AppRules.Where(r => !LegacyAppRules.IsUnmodifiedSeed(r)).ToList();
             settings.SchemaVersion = 3;
             _logger.LogInformation("Migrated settings to schema v3: removed {Removed} seeded app rules, kept {Kept}", before - settings.AppRules.Count, settings.AppRules.Count);
         }

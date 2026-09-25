@@ -271,21 +271,24 @@ public sealed class JsonSettingsStoreTests : IDisposable
     {
         Directory.CreateDirectory(_migrationDir);
         var path = Path.Combine(_migrationDir, "settings.json");
-        // As 0.2 wrote it: the seeded rules (one altered by "remember style"), plus one the user added.
+        // As 0.2 wrote it: seeded rules (OUTLOOK's tone and level altered by "remember style", which still counts as
+        // a seed), seeded rules the user customised (paste mode, hint, switched off), and one the user added.
         await File.WriteAllTextAsync(path, """
             { "SchemaVersion": 2, "AppRules": [
-              { "ProcessGlob": "OUTLOOK", "Tone": "Casual", "Level": "High", "Enabled": true },
-              { "UrlHost": "mail.google.com", "Tone": "Formal", "Level": "Medium", "Enabled": true },
-              { "ProcessGlob": "ms-teams", "Tone": "Casual", "Level": "Light", "Enabled": true },
+              { "ProcessGlob": "OUTLOOK", "Tone": "Casual", "Level": "High", "Hint": "This is an email.", "Enabled": true },
+              { "UrlHost": "mail.google.com", "Tone": "Formal", "Level": "Medium", "Hint": "This is an email.", "Enabled": true },
+              { "ProcessGlob": "ms-teams", "Tone": "Casual", "Level": "Light", "Hint": "This is a chat message.", "Enabled": true },
+              { "ProcessGlob": "WINWORD", "Tone": "Formal", "Level": "Medium", "PasteMode": "CtrlShiftV", "Hint": "This is a document.", "Enabled": true },
+              { "ProcessGlob": "slack", "Tone": "Casual", "Level": "Light", "Hint": "Keep it short.", "Enabled": true },
+              { "ProcessGlob": "Code", "Tone": "Neutral", "Level": "None", "Hint": "This is a code editor.", "Enabled": false },
               { "ProcessGlob": "notepad", "Tone": "Formal", "Enabled": true }
             ] }
             """);
         var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
 
         Assert.Equal(3, store.Current.SchemaVersion);
-        var kept = Assert.Single(store.Current.AppRules);
-        Assert.Equal("notepad", kept.ProcessGlob);
-        Assert.Equal(Tone.Formal, kept.Tone);
+        Assert.Equal(["WINWORD", "slack", "Code", "notepad"], store.Current.AppRules.Select(r => r.ProcessGlob));
+        Assert.Equal(Tone.Formal, store.Current.AppRules[^1].Tone);
         Directory.Delete(_migrationDir, recursive: true);
     }
 

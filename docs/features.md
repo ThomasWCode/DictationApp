@@ -91,8 +91,8 @@ differ). Examples of useful rules:
 | `Code`, `WindowsTerminal`, `pwsh`, `cmd` | Neutral | None |
 
 Versions 0.1 and 0.2 seeded rules like these into every settings file. Settings schema 3 removes those seeded
-entries on upgrade (even ones "Remember tone and cleanup changes" had since altered) and keeps any rule for
-another app that you added yourself.
+entries on upgrade, including ones whose tone or level "Remember tone and cleanup changes" altered on its own.
+A seeded rule whose paste mode, hint or on/off switch you changed is kept, as is every rule for another app.
 
 For Chrome, Edge, Brave, Vivaldi, Opera and Firefox the address bar is read through UI Automation (time-boxed
 to 250 ms) so host rules work per tab.
