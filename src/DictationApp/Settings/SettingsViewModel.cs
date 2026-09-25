@@ -73,6 +73,7 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     // History & privacy
     [ObservableProperty] private bool _storeAudio;
+    [ObservableProperty] private bool _keepMicrophoneReady;
     [ObservableProperty] private RetentionPolicy _historyRetention;
     [ObservableProperty] private RetentionPolicy _audioRetention;
     [ObservableProperty] private string _historyStatus = string.Empty;
@@ -141,6 +142,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         DefaultCleanupLevel = s.DefaultCleanupLevel;
         RememberStyleChanges = s.RememberStyleChanges;
         StoreAudio = s.StoreAudio;
+        KeepMicrophoneReady = s.KeepMicrophoneReady;
         HistoryRetention = s.HistoryRetention;
         AudioRetention = s.AudioRetention;
         Dictionary.Clear();
@@ -205,6 +207,7 @@ public sealed partial class SettingsViewModel : ObservableObject
                 s.DefaultCleanupLevel = DefaultCleanupLevel;
                 s.RememberStyleChanges = RememberStyleChanges;
                 s.StoreAudio = StoreAudio;
+                s.KeepMicrophoneReady = KeepMicrophoneReady;
                 s.HistoryRetention = HistoryRetention;
                 s.AudioRetention = AudioRetention;
                 s.Dictionary = Dictionary.Where(t => !string.IsNullOrWhiteSpace(t.Term)).Select(t => t.Clone()).ToList();

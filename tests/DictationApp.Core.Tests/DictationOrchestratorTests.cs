@@ -232,6 +232,27 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Microphone_and_connection_start_before_the_window_lookup()
+    {
+        bool? micRunning = null;
+        bool? connecting = null;
+        _foreground.OnCapture = () =>
+        {
+            micRunning ??= _capture.IsRunning;
+            connecting ??= _transcriber.ConnectStarted;
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitFor(() => micRunning is not null, "window lookup");
+
+        // Anything said before the microphone starts is lost, so the lookup (UI Automation, browser URL) comes after.
+        Assert.True(micRunning);
+        Assert.True(connecting);
+        _hotkey.Escape();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
     public async Task Socket_failure_during_shutdown_keeps_audio_as_failed_instead_of_pasting()
     {
         await StartAsync();
@@ -437,6 +458,42 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Style_change_during_the_window_lookup_wins_over_the_rule_and_is_remembered_for_it()
+    {
+        await _settings.UpdateAsync(s => s.AppRules = [new Core.Rules.AppRule { ProcessGlob = "notepad", Tone = Tone.Casual, Level = CleanupLevel.High }]);
+        var pressed = false;
+        _foreground.OnCapture = () =>
+        {
+            if (pressed)
+            {
+                return;
+            }
+
+            // The bar shows Listening (default Neutral) before the lookup finishes; Right makes it Formal.
+            pressed = true;
+            _hotkey.Arrow(ArrowDirection.Right);
+            Assert.True(SpinWait.SpinUntil(() => _hub.Current.Tone == Tone.Formal, TimeSpan.FromSeconds(5)), "arrow handled during lookup");
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Text.", endOfTurn: true, formatted: true);
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+
+        // The tone chosen during the lookup is kept; the rule still sets the level, which was not touched.
+        Assert.Equal(Tone.Formal, _post.LastRequest!.Tone);
+        Assert.Equal(CleanupLevel.High, _post.LastRequest.Level);
+        await WaitFor(() => _settings.Current.AppRules[0].Tone == Tone.Formal, "rule updated");
+        Assert.Equal(CleanupLevel.High, _settings.Current.AppRules[0].Level);
+        Assert.Equal(Tone.Neutral, _settings.Current.DefaultTone);
+        Assert.Equal(CleanupLevel.Light, _settings.Current.DefaultCleanupLevel);
+    }
+
+    [Fact]
     public async Task Second_chord_press_during_dictation_flashes_and_is_ignored()
     {
         await StartAsync();
@@ -613,8 +670,11 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public void Fault(Exception ex) => Faulted?.Invoke(ex);
 
+        public bool ConnectStarted { get; private set; }
+
         public async Task<BeginMessage> ConnectAsync(SessionOptions options, CancellationToken ct)
         {
+            ConnectStarted = true;
             var begin = await _connect.Task.WaitAsync(ct);
             IsConnected = true;
             OnConnected?.Invoke();
@@ -680,7 +740,14 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public ForegroundContext Context { get; set; } = new(42, 7, "notepad", "Untitled - Notepad", null, true, false, "uia:Edit");
 
-        public ForegroundContext Capture() => Context;
+        /// <summary>Called on every lookup, so a test can see what was already running at that moment.</summary>
+        public Action? OnCapture { get; set; }
+
+        public ForegroundContext Capture()
+        {
+            OnCapture?.Invoke();
+            return Context;
+        }
     }
 
     private sealed class FakeInserter : ITextInserter

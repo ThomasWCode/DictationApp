@@ -9,6 +9,7 @@ updates, Open logs folder, Quit). Double-clicking the tray icon opens History.
 | Feature | Behaviour |
 |---|---|
 | Hold-to-talk | Hold the chord (default **Ctrl+Win**), speak, release. Audio is captured from the instant the chord goes down, before the server connection exists, so nothing is lost to connect latency. |
+| Microphone ready | The microphone is opened once while idle and only started on the key press, so recording begins 15–100 ms after the chord instead of up to 1.5 s (opening DSP microphones such as Intel Smart Sound is slow). Windows shows the microphone as in use only while dictating. The window and browser-URL lookup runs after the microphone has started. A device change, error or turning off Settings › Audio › "Keep the microphone ready" falls back to opening the device on each press. |
 | Double-tap for hands-free | Tap the chord twice within 400 ms and the dictation keeps running with nothing held; press the chord once to stop. Both ways work all the time, no mode to choose. In hands-free mode only Escape is intercepted (discard); the keyboard otherwise behaves normally, so tone and level are changed with the Flow bar chips. |
 | Short tap | A lone press shorter than 300 ms is cancelled before the streaming session begins, so it costs nothing. |
 | Start menu stays closed | When a chord containing Win fires, an unassigned virtual key (0xE8) is injected so Windows treats the Win press as part of a combination. Win alone still opens Start; Win+E, Win+D and friends work normally. |
@@ -130,7 +131,7 @@ service purges at startup and hourly and also sweeps orphaned WAVs. "Store audio
 Tabs: **General** (Flow bar mode, autostart, update check, GitHub token for updates, dictation cap, language
 codes), **API** (DPAPI-encrypted AssemblyAI and Groq keys, "Test keys" reports each separately, speech model,
 cleanup endpoint, model and fallbacks), **Hotkey** (chord recorder, accept injected keys), **Audio** (device
-picker with live meter), **Style** (default tone and level, remember changes), **Dictionary**, **App rules**,
+picker with live meter, keep the microphone ready), **Style** (default tone and level, remember changes), **Dictionary**, **App rules**,
 **History & privacy**.
 
 ## First run, autostart, updates

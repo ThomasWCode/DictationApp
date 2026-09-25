@@ -76,6 +76,12 @@ public sealed class AppSettings
 
     public PasteMode PasteMode { get; set; } = PasteMode.CtrlV;
 
+    /// <summary>
+    /// Keep the microphone initialised between dictations so recording starts the moment the hotkey is pressed.
+    /// Windows only shows the microphone as in use while a dictation records.
+    /// </summary>
+    public bool KeepMicrophoneReady { get; set; } = true;
+
     public int MaxDictationMinutes { get; set; } = 20;
 
     public FlowBarMode FlowBarMode { get; set; } = FlowBarMode.Full;
