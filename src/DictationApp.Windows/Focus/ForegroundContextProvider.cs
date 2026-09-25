@@ -58,6 +58,8 @@ public sealed class ForegroundContextProvider : IForegroundContextProvider, IDis
         return new ForegroundContext(hwnd, (int)pid, processName, title, url, editable, elevated, reason);
     }
 
+    public string? ReadTextBeforeCaret() => _editable.ReadTextBeforeCaret();
+
     public void Dispose()
     {
         _automation?.Dispose();
