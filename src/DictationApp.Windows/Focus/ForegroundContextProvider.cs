@@ -58,6 +58,18 @@ public sealed class ForegroundContextProvider : IForegroundContextProvider, IDis
         return new ForegroundContext(hwnd, (int)pid, processName, title, url, editable, elevated, reason);
     }
 
+    public string? ReadTextBeforeCaret(ForegroundContext target)
+    {
+        // Only while the window the text will be pasted into still has focus, before and after the read.
+        if (target.WindowHandle == 0 || NativeMethods.GetForegroundWindow() != target.WindowHandle)
+        {
+            return null;
+        }
+
+        var text = _editable.ReadTextBeforeCaret();
+        return NativeMethods.GetForegroundWindow() == target.WindowHandle ? text : null;
+    }
+
     public void Dispose()
     {
         _automation?.Dispose();

@@ -16,6 +16,12 @@ public sealed class FocusedEditableDetector : IDisposable
 {
     public static readonly TimeSpan UiaBudget = TimeSpan.FromMilliseconds(350);
 
+    /// <summary>Time allowed for reading the text before the caret; about 10 ms in Chromium and Win32 edits.</summary>
+    public static readonly TimeSpan CaretBudget = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>Characters read before the caret: enough to see past an invisible stand-in or two.</summary>
+    private const int CaretContextLength = 4;
+
     private static readonly HashSet<string> Allowlist = new(StringComparer.OrdinalIgnoreCase)
     {
         "WindowsTerminal", "Code", "Code - Insiders", "Teams", "ms-teams", "slack", "chrome", "msedge", "firefox",
@@ -75,10 +81,65 @@ public sealed class FocusedEditableDetector : IDisposable
         return (true, "default");
     }
 
+    /// <summary>
+    /// The last few characters before the caret of the focused control, from the Text pattern (the caret or
+    /// selection start). The caller checks that the target window has focus: the control itself may belong to another
+    /// process (WebView2 content runs in msedgewebview2). "" at the start of a field,
+    /// or when a control without a caret position (Value pattern only, a Chromium contenteditable reporting no caret)
+    /// is empty. Null otherwise: password fields, text whose caret position is unknown, controls with neither pattern,
+    /// and when UI Automation does not answer in time.
+    /// </summary>
+    public string? ReadTextBeforeCaret() => RunWithBudget(() => ProbeTextBeforeCaret() is { } text ? new CaretText(text) : (CaretText?)null, CaretBudget)?.Text;
+
     public void Dispose()
     {
         _automation?.Dispose();
         _automation = null;
+    }
+
+    private string? ProbeTextBeforeCaret()
+    {
+        try
+        {
+            _automation ??= new UIA3Automation();
+            var focused = _automation.FocusedElement();
+            if (focused is null || focused.Properties.IsPassword.ValueOrDefault)
+            {
+                return null;
+            }
+
+            if (focused.Patterns.Text.IsSupported)
+            {
+                var pattern = focused.Patterns.Text.Pattern;
+                var selection = pattern.GetSelection();
+                if (selection.Length > 0)
+                {
+                    var before = selection[0].Clone();
+                    before.MoveEndpointByUnit(TextPatternRangeEndpoint.Start, TextUnit.Character, -CaretContextLength);
+                    before.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection[0], TextPatternRangeEndpoint.Start);
+                    return before.GetText(CaretContextLength) ?? string.Empty;
+                }
+
+                // No caret reported (an empty contenteditable in Chromium): an empty document is the start of the field.
+                if (IsBlank(pattern.DocumentRange.GetText(CaretContextLength)))
+                {
+                    return string.Empty;
+                }
+            }
+
+            // The Value pattern gives no caret position: only an empty field says what comes before the insertion.
+            if (focused.Patterns.Value.IsSupported && IsBlank(focused.Patterns.Value.Pattern.Value.ValueOrDefault))
+            {
+                return string.Empty;
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Reading the text before the caret failed");
+            return null;
+        }
     }
 
     private (bool, string)? ProbeUia()
@@ -135,6 +196,11 @@ public sealed class FocusedEditableDetector : IDisposable
             return null;
         }
     }
+
+    /// <summary>Empty apart from whitespace and invisible stand-ins such as a rich editor's empty paragraph.</summary>
+    private static bool IsBlank(string? text) => (text ?? string.Empty).Trim().Trim('\uFFFC', '\u200B', '\uFEFF').Length == 0;
+
+    private readonly record struct CaretText(string Text);
 
     private static T? RunWithBudget<T>(Func<T?> probe, TimeSpan budget) where T : struct
     {

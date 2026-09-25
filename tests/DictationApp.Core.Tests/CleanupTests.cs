@@ -120,6 +120,15 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void Prompt_asks_to_rejoin_sentences_split_at_pauses()
+    {
+        Assert.Contains("cut where the speaker paused", PromptBuilder.BuildSystemPrompt(Ctx()));
+
+        // None keeps the transcript's punctuation even when a tone sends it to the LLM.
+        Assert.DoesNotContain("cut where the speaker paused", PromptBuilder.BuildSystemPrompt(Ctx(CleanupLevel.None, Tone.Formal)));
+    }
+
+    [Fact]
     public void No_keyterms_says_none()
     {
         Assert.Contains("(none)", PromptBuilder.BuildSystemPrompt(Ctx()));
