@@ -131,6 +131,20 @@ public sealed class JsonSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Concurrent_updates_are_never_lost()
+    {
+        var path = Path.Combine(_dir, "settings.json");
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+        await store.UpdateAsync(s => s.Dictionary.Add(new Core.Dictionary.DictionaryTerm { Term = "LSHTM" }));
+
+        // Read-modify-write racing on thread-pool threads, like a remembered style change and a dictionary bump.
+        await Task.WhenAll(Enumerable.Range(0, 50).Select(_ => Task.Run(() => store.UpdateAsync(s => s.Dictionary[0].UseCount++))));
+
+        Assert.Equal(50, store.Current.Dictionary[0].UseCount);
+        Assert.Equal(50, new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance).Current.Dictionary[0].UseCount);
+    }
+
+    [Fact]
     public async Task Round_trips_and_notifies()
     {
         var path = Path.Combine(_dir, "settings.json");
