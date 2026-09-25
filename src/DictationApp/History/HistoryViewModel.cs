@@ -149,7 +149,8 @@ public sealed partial class HistoryViewModel : ObservableObject
             var target = _foreground.Capture();
             if (target.IsEditable && !target.IsElevated)
             {
-                await _inserter.InsertAsync(text, target, _settings.Current.PasteMode, CancellationToken.None);
+                // The destination app's rule decides the paste keystroke, as for a live dictation.
+                await _inserter.InsertAsync(text, target, DictationOrchestrator.PasteModeFor(target, _settings.Current), CancellationToken.None);
                 Status = $"Re-inserted into {target.ProcessName}.";
             }
             else
