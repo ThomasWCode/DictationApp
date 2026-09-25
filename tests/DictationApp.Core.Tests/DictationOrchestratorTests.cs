@@ -232,6 +232,27 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Microphone_and_connection_start_before_the_window_lookup()
+    {
+        bool? micRunning = null;
+        bool? connecting = null;
+        _foreground.OnCapture = () =>
+        {
+            micRunning ??= _capture.IsRunning;
+            connecting ??= _transcriber.ConnectStarted;
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitFor(() => micRunning is not null, "window lookup");
+
+        // Anything said before the microphone starts is lost, so the lookup (UI Automation, browser URL) comes after.
+        Assert.True(micRunning);
+        Assert.True(connecting);
+        _hotkey.Escape();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
     public async Task Socket_failure_during_shutdown_keeps_audio_as_failed_instead_of_pasting()
     {
         await StartAsync();
@@ -613,8 +634,11 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public void Fault(Exception ex) => Faulted?.Invoke(ex);
 
+        public bool ConnectStarted { get; private set; }
+
         public async Task<BeginMessage> ConnectAsync(SessionOptions options, CancellationToken ct)
         {
+            ConnectStarted = true;
             var begin = await _connect.Task.WaitAsync(ct);
             IsConnected = true;
             OnConnected?.Invoke();
@@ -680,7 +704,14 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public ForegroundContext Context { get; set; } = new(42, 7, "notepad", "Untitled - Notepad", null, true, false, "uia:Edit");
 
-        public ForegroundContext Capture() => Context;
+        /// <summary>Called on every lookup, so a test can see what was already running at that moment.</summary>
+        public Action? OnCapture { get; set; }
+
+        public ForegroundContext Capture()
+        {
+            OnCapture?.Invoke();
+            return Context;
+        }
     }
 
     private sealed class FakeInserter : ITextInserter
