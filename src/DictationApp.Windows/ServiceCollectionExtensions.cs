@@ -17,6 +17,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<LowLevelKeyboardHook>();
         services.TryAddSingleton<HotkeyService>();
         services.TryAddSingleton<IHotkeyService>(sp => sp.GetRequiredService<HotkeyService>());
+        services.TryAddSingleton<WarmMicrophone>();
         services.TryAddSingleton<IAudioCaptureFactory, WindowsAudioCaptureFactory>();
         services.TryAddSingleton<IAudioSinkFactory, WavFileSinkFactory>();
         services.TryAddSingleton<FocusedEditableDetector>();

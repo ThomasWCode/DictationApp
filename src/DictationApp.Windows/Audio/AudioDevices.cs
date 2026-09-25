@@ -43,9 +43,9 @@ public static class AudioDeviceEnumerator
     }
 }
 
-public sealed class WindowsAudioCaptureFactory(ILoggerFactory loggerFactory) : IAudioCaptureFactory
+public sealed class WindowsAudioCaptureFactory(ILoggerFactory loggerFactory, WarmMicrophone warm) : IAudioCaptureFactory
 {
-    public IAudioCapture CreateMicrophone(string? deviceId) => new WasapiAudioCapture(deviceId, loggerFactory.CreateLogger<WasapiAudioCapture>());
+    public IAudioCapture CreateMicrophone(string? deviceId) => new WasapiAudioCapture(deviceId, loggerFactory.CreateLogger<WasapiAudioCapture>(), warm);
 
     public IAudioCapture CreateWavReplay(string wavPath, double speed) => new WavReplayAudioCapture(wavPath, speed, loggerFactory.CreateLogger<WavReplayAudioCapture>());
 }
