@@ -1,9 +1,10 @@
 namespace DictationApp.Core.Insertion;
 
 /// <summary>
-/// Pure. Decides the joining whitespace and capitalisation between consecutive insertions into the same
-/// window. We never read the target's text (too slow and unreliable across apps); instead we remember what
-/// we inserted last per window handle. The memory expires so a stale entry cannot mis-space tomorrow's text.
+/// Decides the joining whitespace and capitalisation before an insertion. The text before the caret, read from
+/// the control, decides when it is known: an empty chat box after a message was sent gets no leading space.
+/// Otherwise what we inserted last per window handle stands in for it; that memory expires so a stale entry
+/// cannot mis-space tomorrow's text.
 /// </summary>
 public sealed class InsertionTextFormatter
 {
@@ -19,7 +20,9 @@ public sealed class InsertionTextFormatter
     /// <summary>How long a previous insertion is remembered for spacing decisions.</summary>
     public TimeSpan Memory { get; init; } = TimeSpan.FromMinutes(10);
 
-    public string Format(string text, nint windowHandle)
+    /// <param name="textBeforeCaret">The control's text just before the caret ("" at the start of a field), or null
+    /// when it could not be read.</param>
+    public string Format(string text, nint windowHandle, string? textBeforeCaret = null)
     {
         if (string.IsNullOrEmpty(text))
         {
@@ -30,7 +33,11 @@ public sealed class InsertionTextFormatter
         {
             var now = _time.GetUtcNow();
             string? tail = null;
-            if (_lastByWindow.TryGetValue(windowHandle, out var last) && now - last.At <= Memory)
+            if (textBeforeCaret is not null)
+            {
+                tail = VisibleTail(textBeforeCaret);
+            }
+            else if (_lastByWindow.TryGetValue(windowHandle, out var last) && now - last.At <= Memory)
             {
                 tail = last.Tail;
             }
@@ -58,7 +65,18 @@ public sealed class InsertionTextFormatter
         }
     }
 
-    /// <summary>Pure core: <paramref name="previousTail"/> is the last character we inserted into this window, or null.</summary>
+    /// <summary>
+    /// The last character of <paramref name="textBeforeCaret"/> that is not an invisible stand-in, or null at the start
+    /// of the field. Rich editors report an empty paragraph as an object character (U+FFFC); WhatsApp keeps a zero-width
+    /// space in its empty fields.
+    /// </summary>
+    public static string? VisibleTail(string textBeforeCaret)
+    {
+        var trimmed = textBeforeCaret.TrimEnd('\uFFFC', '\u200B', '\u200C', '\u200D', '\u2060', '\uFEFF');
+        return trimmed.Length == 0 ? null : trimmed[^1].ToString();
+    }
+
+    /// <summary>Pure core: <paramref name="previousTail"/> is the character before the insertion point, or null.</summary>
     public static string Apply(string text, string? previousTail)
     {
         if (string.IsNullOrEmpty(text))

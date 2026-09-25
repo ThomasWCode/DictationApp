@@ -32,6 +32,12 @@ public sealed record ForegroundContext(
 public interface IForegroundContextProvider
 {
     ForegroundContext Capture();
+
+    /// <summary>
+    /// The last few characters before the caret in the focused control: "" at the start of a field or in an empty
+    /// one, null when the control does not say (then the last insertion into the window decides the spacing).
+    /// </summary>
+    string? ReadTextBeforeCaret() => null;
 }
 
 public enum PasteMode

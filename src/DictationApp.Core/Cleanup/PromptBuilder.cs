@@ -28,6 +28,9 @@ public static class PromptBuilder
         sb.AppendLine("   \"one... two... three\", \"point one\") or clearly dictates a list, output a numbered list");
         sb.AppendLine("   (\"1. \", \"2. \") or a bullet list (\"- \") with one item per line and no other prose between");
         sb.AppendLine("   items. Numbers that are merely mentioned inside a sentence stay in the sentence.");
+        sb.AppendLine("   The transcript is punctuated in pieces cut where the speaker paused, so a full stop and capital");
+        sb.AppendLine("   letter can fall inside a sentence (\"Typing into the search box. Still adds a space.\" -> \"Typing");
+        sb.AppendLine("   into the search box still adds a space.\"): join such fragments into the sentence they belong to.");
         sb.Append("4. Preserve the exact spelling and capitalisation of these terms if present: ");
         sb.AppendLine(ctx.Keyterms.Count == 0 ? "(none)" : string.Join(", ", ctx.Keyterms));
         sb.Append("5. Cleanup level: ").AppendLine(LevelInstruction(ctx.Level));
@@ -55,7 +58,7 @@ public static class PromptBuilder
     public static string LevelInstruction(CleanupLevel level) => level switch
     {
         CleanupLevel.None => "Do not change wording; apply only the tone rules and formatting commands.",
-        CleanupLevel.Light => "Remove fillers (um, uh, like, you know), false starts, stutters, and immediate self-corrections (\"Monday, no, Tuesday\" -> \"Tuesday\"). Fix punctuation and capitalisation. Do not rephrase or reorder.",
+        CleanupLevel.Light => "Remove fillers (um, uh, like, you know), false starts, stutters, and immediate self-corrections (\"Monday, no, Tuesday\" -> \"Tuesday\"). Fix punctuation and capitalisation, including removing full stops placed where the speaker only paused mid-sentence. Do not rephrase or reorder.",
         CleanupLevel.Medium => "Remove fillers, false starts, stutters and immediate self-corrections; fix punctuation and capitalisation; fix grammar and agreement errors; remove redundant repetition; split run-on sentences. Keep the user's words and order where possible.",
         CleanupLevel.High => "Remove fillers, false starts and self-corrections; fix punctuation, capitalisation and grammar; remove redundancy; tighten wording; merge fragments; add paragraph breaks at topic shifts. Keep every fact, name, number and instruction. Do not shorten by more than 30%.",
         _ => throw new ArgumentOutOfRangeException(nameof(level)),
@@ -75,8 +78,8 @@ public static class PromptBuilder
             "Input: ok so um send the report by friday new line thanks\n" +
             "Output: ok so um send the report by friday\nthanks",
         CleanupLevel.Light =>
-            "Input: um so I think we should, we should ship on monday no tuesday period what do you think question mark\n" +
-            "Output: So I think we should ship on Tuesday. What do you think?",
+            "Input: um so I think we should, we should ship on monday no tuesday. Because the build. Is not ready period what do you think question mark\n" +
+            "Output: So I think we should ship on Tuesday because the build is not ready. What do you think?",
         CleanupLevel.Medium =>
             "Input: uh the results they was pretty clear the results show that the the drug works and it works well and we should we should publish\n" +
             "Output: The results were pretty clear. They show that the drug works well, and we should publish.",

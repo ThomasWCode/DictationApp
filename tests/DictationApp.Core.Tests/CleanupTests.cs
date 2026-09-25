@@ -120,6 +120,12 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void Prompt_asks_to_rejoin_sentences_split_at_pauses()
+    {
+        Assert.Contains("cut where the speaker paused", PromptBuilder.BuildSystemPrompt(Ctx()));
+    }
+
+    [Fact]
     public void No_keyterms_says_none()
     {
         Assert.Contains("(none)", PromptBuilder.BuildSystemPrompt(Ctx()));
