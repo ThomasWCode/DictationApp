@@ -458,6 +458,42 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Style_change_during_the_window_lookup_wins_over_the_rule_and_is_remembered_for_it()
+    {
+        await _settings.UpdateAsync(s => s.AppRules = [new Core.Rules.AppRule { ProcessGlob = "notepad", Tone = Tone.Casual, Level = CleanupLevel.High }]);
+        var pressed = false;
+        _foreground.OnCapture = () =>
+        {
+            if (pressed)
+            {
+                return;
+            }
+
+            // The bar shows Listening (default Neutral) before the lookup finishes; Right makes it Formal.
+            pressed = true;
+            _hotkey.Arrow(ArrowDirection.Right);
+            Assert.True(SpinWait.SpinUntil(() => _hub.Current.Tone == Tone.Formal, TimeSpan.FromSeconds(5)), "arrow handled during lookup");
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Text.", endOfTurn: true, formatted: true);
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+
+        // The tone chosen during the lookup is kept; the rule still sets the level, which was not touched.
+        Assert.Equal(Tone.Formal, _post.LastRequest!.Tone);
+        Assert.Equal(CleanupLevel.High, _post.LastRequest.Level);
+        await WaitFor(() => _settings.Current.AppRules[0].Tone == Tone.Formal, "rule updated");
+        Assert.Equal(CleanupLevel.High, _settings.Current.AppRules[0].Level);
+        Assert.Equal(Tone.Neutral, _settings.Current.DefaultTone);
+        Assert.Equal(CleanupLevel.Light, _settings.Current.DefaultCleanupLevel);
+    }
+
+    [Fact]
     public async Task Second_chord_press_during_dictation_flashes_and_is_ignored()
     {
         await StartAsync();

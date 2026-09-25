@@ -322,42 +322,70 @@ public sealed class DictationOrchestrator : BackgroundService
             case ControlKind.Arrow:
                 if (_session is { } s && _machine.State is DictationState.Arming or DictationState.Recording)
                 {
-                    switch (ev.Arrow)
+                    bool remember;
+                    lock (s.StyleLock)
                     {
-                        case ArrowDirection.Left:
-                            s.Tone = s.Tone.Previous();
-                            break;
-                        case ArrowDirection.Right:
-                            s.Tone = s.Tone.Next();
-                            break;
-                        case ArrowDirection.Up:
-                            s.Level = s.Level.Next();
-                            break;
-                        case ArrowDirection.Down:
-                            s.Level = s.Level.Previous();
-                            break;
+                        switch (ev.Arrow)
+                        {
+                            case ArrowDirection.Left:
+                                s.Tone = s.Tone.Previous();
+                                break;
+                            case ArrowDirection.Right:
+                                s.Tone = s.Tone.Next();
+                                break;
+                            case ArrowDirection.Up:
+                                s.Level = s.Level.Next();
+                                break;
+                            case ArrowDirection.Down:
+                                s.Level = s.Level.Previous();
+                                break;
+                        }
+
+                        var toneKey = ev.Arrow is ArrowDirection.Left or ArrowDirection.Right;
+                        remember = CanRememberStyleNow(s, tone: toneKey, level: !toneKey);
                     }
 
                     PublishSession(s, _machine.State, null);
-                    RememberStyle(s);
+                    if (remember)
+                    {
+                        RememberStyle(s);
+                    }
                 }
 
                 break;
             case ControlKind.ToneOverride:
                 if (_session is { } ts && ev.Tone is { } tone)
                 {
-                    ts.Tone = tone;
+                    bool remember;
+                    lock (ts.StyleLock)
+                    {
+                        ts.Tone = tone;
+                        remember = CanRememberStyleNow(ts, tone: true, level: false);
+                    }
+
                     PublishSession(ts, _machine.State, null);
-                    RememberStyle(ts);
+                    if (remember)
+                    {
+                        RememberStyle(ts);
+                    }
                 }
 
                 break;
             case ControlKind.LevelOverride:
                 if (_session is { } ls && ev.Level is { } level)
                 {
-                    ls.Level = level;
+                    bool remember;
+                    lock (ls.StyleLock)
+                    {
+                        ls.Level = level;
+                        remember = CanRememberStyleNow(ls, tone: false, level: true);
+                    }
+
                     PublishSession(ls, _machine.State, null);
-                    RememberStyle(ls);
+                    if (remember)
+                    {
+                        RememberStyle(ls);
+                    }
                 }
 
                 break;
@@ -422,9 +450,32 @@ public sealed class DictationOrchestrator : BackgroundService
 
             // 3. Where the user is: target window, editability, browser URL and app rule (tone and level).
             session.Context = SafeCapture();
-            session.Rule = AppRulesResolver.Resolve(session.Context, settings.AppRules, settings.DefaultTone, settings.DefaultCleanupLevel, settings.PasteMode);
-            session.Tone = session.Rule.Tone;
-            session.Level = session.Rule.Level;
+            // The bar already shows Listening, so an arrow key or chip may have changed the tone or level meanwhile:
+            // that choice wins over the rule's, and is remembered now that it is known which rule it belongs to.
+            var rule = AppRulesResolver.Resolve(session.Context, settings.AppRules, settings.DefaultTone, settings.DefaultCleanupLevel, settings.PasteMode);
+            bool rememberEarlyChange;
+            lock (session.StyleLock)
+            {
+                session.Rule = rule;
+                if (!session.ToneChangedBeforeRule)
+                {
+                    session.Tone = rule.Tone;
+                }
+
+                if (!session.LevelChangedBeforeRule)
+                {
+                    session.Level = rule.Level;
+                }
+
+                session.RuleResolved = true;
+                rememberEarlyChange = session.ToneChangedBeforeRule || session.LevelChangedBeforeRule;
+            }
+
+            if (rememberEarlyChange)
+            {
+                RememberStyle(session);
+            }
+
             record.ProcessName = session.Context.ProcessName;
             record.WindowTitle = session.Context.WindowTitle;
             record.Url = session.Context.Url;
@@ -906,6 +957,22 @@ public sealed class DictationOrchestrator : BackgroundService
     }
 
     /// <summary>
+    /// True when a style change can be remembered at once. Before the app rule is resolved it is only noted, and
+    /// the session remembers it against the right rule (or the defaults) once resolved. Call under StyleLock.
+    /// </summary>
+    private static bool CanRememberStyleNow(DictationSession session, bool tone, bool level)
+    {
+        if (session.RuleResolved)
+        {
+            return true;
+        }
+
+        session.ToneChangedBeforeRule |= tone;
+        session.LevelChangedBeforeRule |= level;
+        return false;
+    }
+
+    /// <summary>
     /// Persists a tone/level change so the next dictation in the same context starts from it: the matched
     /// app rule is updated, or the global defaults when no rule matched. Off when RememberStyleChanges is false.
     /// </summary>
@@ -1003,6 +1070,17 @@ public sealed class DictationOrchestrator : BackgroundService
         public ForegroundContext Context { get; set; } = ForegroundContext.Unknown;
 
         public ResolvedRule Rule { get; set; } = new(Tone.Neutral, CleanupLevel.Light, PasteMode.CtrlV, null, "default");
+
+        /// <summary>Guards Rule, Tone and Level while the rule is resolved alongside arrow keys and chips.</summary>
+        public object StyleLock { get; } = new();
+
+        public bool RuleResolved { get; set; }
+
+        /// <summary>The user changed the tone before the app rule was known, so the rule's tone does not apply.</summary>
+        public bool ToneChangedBeforeRule { get; set; }
+
+        /// <summary>The user changed the cleanup level before the app rule was known.</summary>
+        public bool LevelChangedBeforeRule { get; set; }
 
         public Tone Tone { get; set; }
 

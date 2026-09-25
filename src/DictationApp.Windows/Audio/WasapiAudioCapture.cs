@@ -98,18 +98,21 @@ public sealed class WasapiAudioCapture : IAudioCapture
 
     public void Stop()
     {
+        // Checked first: a capture fault clears IsRunning before raising Faulted, and the prepared client must
+        // still go back to WarmMicrophone.
+        if (_prepared is { } prepared)
+        {
+            IsRunning = false;
+            StopWarm(prepared);
+            return;
+        }
+
         if (!IsRunning)
         {
             return;
         }
 
         IsRunning = false;
-        if (_prepared is { } prepared)
-        {
-            StopWarm(prepared);
-            return;
-        }
-
         try
         {
             _capture?.StopRecording();
@@ -118,6 +121,10 @@ public sealed class WasapiAudioCapture : IAudioCapture
         {
             _logger.LogDebug(ex, "StopRecording threw");
         }
+
+        // Nothing was ready for this dictation (preparation failed, say while another app held the device), so try
+        // again for the next one.
+        _warm?.RequestPreparation();
     }
 
     public void Dispose()
