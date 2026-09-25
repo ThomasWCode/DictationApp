@@ -660,7 +660,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 pasteMode = PasteModeFor(target, settings);
             }
 
-            var text = _formatter.Format(result.Text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret() : null);
+            var text = _formatter.Format(result.Text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
             record.InsertedText = text;
             InsertionResult insertion;
             if (target.IsEditable && !target.IsElevated)
@@ -920,11 +920,11 @@ public sealed class DictationOrchestrator : BackgroundService
         MaxTurnSilenceMs = DictationMaxTurnSilenceMs,
     };
 
-    private string? SafeReadTextBeforeCaret()
+    private string? SafeReadTextBeforeCaret(ForegroundContext target)
     {
         try
         {
-            return _foreground.ReadTextBeforeCaret();
+            return _foreground.ReadTextBeforeCaret(target);
         }
         catch (Exception ex)
         {

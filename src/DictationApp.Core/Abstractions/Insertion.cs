@@ -34,10 +34,11 @@ public interface IForegroundContextProvider
     ForegroundContext Capture();
 
     /// <summary>
-    /// The last few characters before the caret in the focused control: "" at the start of a field or in an empty
-    /// one, null when the control does not say (then the last insertion into the window decides the spacing).
+    /// The last few characters before the caret in the focused control of <paramref name="target"/>: "" at the start
+    /// of a field or in an empty one, null when the control does not say or focus is no longer in that window (then
+    /// the last insertion into the window decides the spacing).
     /// </summary>
-    string? ReadTextBeforeCaret() => null;
+    string? ReadTextBeforeCaret(ForegroundContext target) => null;
 }
 
 public enum PasteMode

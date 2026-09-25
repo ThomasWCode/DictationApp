@@ -28,9 +28,13 @@ public static class PromptBuilder
         sb.AppendLine("   \"one... two... three\", \"point one\") or clearly dictates a list, output a numbered list");
         sb.AppendLine("   (\"1. \", \"2. \") or a bullet list (\"- \") with one item per line and no other prose between");
         sb.AppendLine("   items. Numbers that are merely mentioned inside a sentence stay in the sentence.");
-        sb.AppendLine("   The transcript is punctuated in pieces cut where the speaker paused, so a full stop and capital");
-        sb.AppendLine("   letter can fall inside a sentence (\"Typing into the search box. Still adds a space.\" -> \"Typing");
-        sb.AppendLine("   into the search box still adds a space.\"): join such fragments into the sentence they belong to.");
+        if (ctx.Level != CleanupLevel.None)
+        {
+            // Not at None, which keeps the transcript's wording and punctuation even when a tone runs the LLM.
+            sb.AppendLine("   The transcript is punctuated in pieces cut where the speaker paused, so a full stop and capital");
+            sb.AppendLine("   letter can fall inside a sentence (\"Typing into the search box. Still adds a space.\" -> \"Typing");
+            sb.AppendLine("   into the search box still adds a space.\"): join such fragments into the sentence they belong to.");
+        }
         sb.Append("4. Preserve the exact spelling and capitalisation of these terms if present: ");
         sb.AppendLine(ctx.Keyterms.Count == 0 ? "(none)" : string.Join(", ", ctx.Keyterms));
         sb.Append("5. Cleanup level: ").AppendLine(LevelInstruction(ctx.Level));
