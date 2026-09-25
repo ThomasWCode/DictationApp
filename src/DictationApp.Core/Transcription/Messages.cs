@@ -116,17 +116,23 @@ public static class StreamingMessageParser
             return null;
         }
 
-        if (root.TryGetProperty("error", out _) && !root.TryGetProperty("type", out _))
+        var type = root.TryGetProperty("type", out var typeProp) && typeProp.ValueKind == JsonValueKind.String ? typeProp.GetString() : null;
+
+        // Errors arrive both untyped ({"error": ...}) and typed ({"type":"Error","error": ...}); either must fail
+        // the session at once rather than leave it waiting for a timeout.
+        if (root.TryGetProperty("error", out var errorProp) || string.Equals(type, "Error", StringComparison.OrdinalIgnoreCase))
         {
-            return root.Deserialize<ErrorMessage>(Options);
+            var detail = errorProp.ValueKind != JsonValueKind.Undefined ? errorProp : root.TryGetProperty("message", out var messageProp) ? messageProp : default;
+            var text = detail.ValueKind switch
+            {
+                JsonValueKind.String => detail.GetString(),
+                JsonValueKind.Undefined or JsonValueKind.Null => null,
+                _ => detail.GetRawText(),
+            };
+            return new ErrorMessage { Type = "Error", Error = text ?? "unknown error" };
         }
 
-        if (!root.TryGetProperty("type", out var typeProp))
-        {
-            return null;
-        }
-
-        return typeProp.GetString() switch
+        return type switch
         {
             "Begin" => root.Deserialize<BeginMessage>(Options),
             "Turn" => root.Deserialize<TurnMessage>(Options),

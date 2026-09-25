@@ -232,6 +232,43 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Failure_without_audio_keeps_the_partial_transcript()
+    {
+        await _settings.UpdateAsync(s => s.StoreAudio = false);
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _capture.Emit(1);
+        _transcriber.RaiseTurn(0, "half a sentence", endOfTurn: false);
+        await WaitFor(() => _hub.Current.LiveText == "half a sentence", "live text");
+        _transcriber.Fault(new System.Net.WebSockets.WebSocketException("dropped"));
+        await WaitForIdleSession();
+
+        var record = Assert.Single(_history.Records);
+        Assert.Equal(RecordStatus.Failed, record.Status);
+        Assert.Equal("half a sentence", record.RawTranscript);
+        Assert.Null(record.AudioPath);
+        Assert.Null(_sinks.Last);
+        Assert.Contains(_notifier.Toasts, t => t.Message.Contains("saved in History", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Failure_with_neither_audio_nor_words_only_toasts()
+    {
+        await _settings.UpdateAsync(s => s.StoreAudio = false);
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.FailConnect(new System.Net.WebSockets.WebSocketException("offline"));
+        await WaitForIdleSession();
+
+        Assert.Empty(_history.Records);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Dictation failed");
+    }
+
+    [Fact]
     public async Task Nothing_heard_writes_no_record_and_removes_audio()
     {
         await StartAsync();
