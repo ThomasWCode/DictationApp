@@ -24,6 +24,7 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
     private readonly ISettingsStore _settings;
     private readonly ILogger<WarmMicrophone> _logger;
     private readonly object _lock = new();
+    private readonly SemaphoreSlim _prepareGate = new(1, 1);
     private MMDeviceEnumerator? _notifications;
     private PreparedMicrophone? _ready;
     private bool _inUse;
@@ -85,6 +86,12 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
         }
     }
 
+    /// <summary>
+    /// Prepares a client if none is ready. Called after a dictation had to open the device itself, which also
+    /// retries a preparation that failed because the device was busy or blocked at the time.
+    /// </summary>
+    public void RequestPreparation() => PrepareInBackground();
+
     /// <summary>Takes the client back after a dictation; an unhealthy or outdated one is replaced in the background.</summary>
     public void Release(PreparedMicrophone microphone, bool healthy)
     {
@@ -144,6 +151,20 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
 
     private void Prepare()
     {
+        // One at a time: a request that waited finds the client ready, or prepares the newer device selection.
+        _prepareGate.Wait();
+        try
+        {
+            PrepareCore();
+        }
+        finally
+        {
+            _prepareGate.Release();
+        }
+    }
+
+    private void PrepareCore()
+    {
         string? deviceId;
         lock (_lock)
         {
@@ -179,17 +200,35 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
             return;
         }
 
+        bool superseded;
+        bool installed;
         lock (_lock)
         {
-            if (_disposed || _inUse || !Enabled)
+            // The device selection may have changed while this one was opening.
+            superseded = !string.Equals(_settings.Current.MicrophoneDeviceId, deviceId, StringComparison.Ordinal);
+            installed = !_disposed && !_inUse && Enabled && !superseded;
+            if (installed)
+            {
+                _ready?.Dispose();
+                _ready = fresh;
+                _stale = false;
+            }
+            else
             {
                 fresh.Dispose();
-                return;
             }
+        }
 
-            _ready?.Dispose();
-            _ready = fresh;
-            _stale = false;
+        if (superseded)
+        {
+            _logger.LogDebug("Prepared microphone discarded: the device selection changed meanwhile");
+            PrepareInBackground();
+            return;
+        }
+
+        if (!installed)
+        {
+            return;
         }
 
         _logger.LogInformation("Microphone ready on {Device} ({Elapsed} ms)", fresh.Name, Environment.TickCount64 - started);
