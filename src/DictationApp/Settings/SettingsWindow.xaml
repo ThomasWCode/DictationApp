@@ -138,6 +138,9 @@
             <TextBlock Text="{Binding MicTestStatus}" VerticalAlignment="Center" Margin="10,0,0,0" />
           </StackPanel>
           <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0" Text="Audio is captured in shared mode and converted to 16 kHz mono before streaming, so any device works. If the meter stays flat, check Settings > Privacy > Microphone in Windows." />
+          <TextBlock Text="Start-up" Style="{StaticResource Heading}" Margin="0,18,0,8" />
+          <CheckBox Content="Keep the microphone ready so recording starts the moment you press the hotkey" IsChecked="{Binding KeepMicrophoneReady}" />
+          <TextBlock Style="{StaticResource Hint}" Text="Opening some microphones (Intel Smart Sound and other DSP microphones) takes up to a second, which cut off the first words. With this on, the microphone is opened once and only started when you dictate; Windows shows it as in use only while you dictate. Turn it off if another app needs the microphone exclusively." />
         </StackPanel>
       </TabItem>
 

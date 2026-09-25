@@ -376,18 +376,8 @@ public sealed class DictationOrchestrator : BackgroundService
         {
             _machine.Fire(DictationTrigger.ChordDown);
 
-            // 1. Capture where the user is before anything else moves.
-            session.Context = SafeCapture();
-            session.Rule = AppRulesResolver.Resolve(session.Context, settings.AppRules, settings.DefaultTone, settings.DefaultCleanupLevel, settings.PasteMode);
-            session.Tone = session.Rule.Tone;
-            session.Level = session.Rule.Level;
-            record.ProcessName = session.Context.ProcessName;
-            record.WindowTitle = session.Context.WindowTitle;
-            record.Url = session.Context.Url;
-            _logger.LogInformation("Dictation started in {Process} ({Title}) rule={Rule} editable={Editable}/{Reason} elevated={Elevated}", session.Context.ProcessName, session.Context.WindowTitle, session.Rule.MatchedBy, session.Context.IsEditable, session.Context.EditableReason, session.Context.IsElevated);
-            PublishSession(session, DictationState.Arming, "Listening");
-
-            // 2. Microphone + WAV sink. Frames buffer in the channel until the socket is ready.
+            // 1. Microphone first: anything said before it starts is lost. Frames buffer in the channel until the
+            // socket is ready, and nothing here moves focus, so the window lookup below still sees the target.
             if (settings.StoreAudio)
             {
                 sink = _sinks.Create(_paths.NewAudioPath(session.StartedAt));
@@ -411,8 +401,11 @@ public sealed class DictationOrchestrator : BackgroundService
             };
             capture.Faulted += session.Fault;
             capture.Start();
+            session.Tone = settings.DefaultTone;
+            session.Level = settings.DefaultCleanupLevel;
+            PublishSession(session, DictationState.Arming, "Listening");
 
-            // 3. Socket.
+            // 2. Socket: its ~0.8 s TLS and session setup overlaps the window lookup below.
             transcriber = _transcribers.Create();
             session.AttachTranscriber(transcriber);
             transcriber.TurnReceived += turn =>
@@ -426,6 +419,17 @@ public sealed class DictationOrchestrator : BackgroundService
             using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             connectCts.CancelAfter(ConnectTimeout);
             var connectTask = transcriber.ConnectAsync(BuildSessionOptions(settings), connectCts.Token);
+
+            // 3. Where the user is: target window, editability, browser URL and app rule (tone and level).
+            session.Context = SafeCapture();
+            session.Rule = AppRulesResolver.Resolve(session.Context, settings.AppRules, settings.DefaultTone, settings.DefaultCleanupLevel, settings.PasteMode);
+            session.Tone = session.Rule.Tone;
+            session.Level = session.Rule.Level;
+            record.ProcessName = session.Context.ProcessName;
+            record.WindowTitle = session.Context.WindowTitle;
+            record.Url = session.Context.Url;
+            _logger.LogInformation("Dictation started in {Process} ({Title}) rule={Rule} editable={Editable}/{Reason} elevated={Elevated}", session.Context.ProcessName, session.Context.WindowTitle, session.Rule.MatchedBy, session.Context.IsEditable, session.Context.EditableReason, session.Context.IsElevated);
+            PublishSession(session, DictationState.Arming, "Listening");
             var silentMicTask = WatchForSilentMicrophoneAsync(session, ct);
 
             var first = await Task.WhenAny(connectTask, session.Released, session.Escaped, session.Faulted).ConfigureAwait(false);

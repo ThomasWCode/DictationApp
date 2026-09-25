@@ -58,6 +58,9 @@ public static class HostFactory
             builder.Services.AddTransient<CorrectionWindow>();
             builder.Services.AddHostedService(sp => sp.GetRequiredService<UpdateCheckService>());
             builder.Services.AddHostedService<HistoryRetentionService>();
+
+            // Keeps the microphone initialised so a key press starts recording at once (tray app only).
+            builder.Services.AddHostedService(sp => sp.GetRequiredService<DictationApp.Windows.Audio.WarmMicrophone>());
         }
         else
         {
