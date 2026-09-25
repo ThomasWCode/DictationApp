@@ -37,6 +37,40 @@ public class InsertionTextFormatterTests
     }
 
     [Fact]
+    public void The_text_before_the_caret_wins_over_memory()
+    {
+        var f = new InsertionTextFormatter();
+        f.Format("First message.", 1);
+
+        // The message was sent, so the chat box is empty: no leading space, although we inserted there before.
+        Assert.Equal("Second message.", f.Format("Second message.", 1, textBeforeCaret: ""));
+        Assert.Equal(" Third", f.Format("third", 1, textBeforeCaret: "one."));
+        Assert.Equal(" more", f.Format("more", 1, textBeforeCaret: "word"));
+        Assert.Equal("next", f.Format("next", 1, textBeforeCaret: "end "));
+    }
+
+    [Theory]
+    [InlineData("\uFFFC", "hello")] // an empty paragraph in a rich editor (the Claude app's prompt box)
+    [InlineData("\u200B", "hello")] // WhatsApp's empty fields
+    [InlineData("\n\uFFFC", "Hello")] // an empty line after earlier text
+    public void Invisible_stand_ins_before_the_caret_are_skipped(string textBeforeCaret, string expected)
+    {
+        var f = new InsertionTextFormatter();
+        f.Format("Earlier text", 1);
+
+        Assert.Equal(expected, f.Format("hello", 1, textBeforeCaret));
+    }
+
+    [Fact]
+    public void Unreadable_controls_fall_back_to_memory()
+    {
+        var f = new InsertionTextFormatter();
+        f.Format("First sentence.", 1);
+
+        Assert.Equal(" Second", f.Format("second", 1, textBeforeCaret: null));
+    }
+
+    [Fact]
     public void Reset_clears_memory()
     {
         var f = new InsertionTextFormatter();

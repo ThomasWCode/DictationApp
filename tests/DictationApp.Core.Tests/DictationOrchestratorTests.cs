@@ -232,6 +232,52 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Sessions_wait_for_a_real_pause_before_ending_a_turn()
+    {
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitFor(() => _transcriber.Options is not null, "connect");
+
+        // AssemblyAI's 100 ms default split sentences at every pause to think.
+        Assert.Equal(DictationOrchestrator.DictationMinTurnSilenceMs, _transcriber.Options!.MinTurnSilenceMs);
+        Assert.Equal(DictationOrchestrator.DictationMaxTurnSilenceMs, _transcriber.Options.MaxTurnSilenceMs);
+        Assert.Contains("min_turn_silence=1000", _transcriber.Options.BuildQueryString());
+        _hotkey.Escape();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
+    public async Task No_leading_space_when_the_field_is_empty_again()
+    {
+        await StartAsync();
+        await DictateAsync("First message.");
+        Assert.StartsWith("First message.", _inserter.LastText);
+
+        // The message was sent: the control reports an empty field, so the memory of the last insertion is ignored.
+        _foreground.TextBeforeCaret = "";
+        await DictateAsync("Second message.");
+        Assert.StartsWith("Second message.", _inserter.LastText);
+        Assert.Equal(_foreground.Context.WindowHandle, _foreground.CaretTarget?.WindowHandle);
+
+        // Unreadable controls keep the old behaviour.
+        _foreground.TextBeforeCaret = null;
+        await DictateAsync("Third.");
+        Assert.StartsWith(" Third.", _inserter.LastText);
+    }
+
+    private async Task DictateAsync(string text)
+    {
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, text, endOfTurn: true, formatted: true);
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
     public async Task Microphone_and_connection_start_before_the_window_lookup()
     {
         bool? micRunning = null;
@@ -672,9 +718,12 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public bool ConnectStarted { get; private set; }
 
+        public SessionOptions? Options { get; private set; }
+
         public async Task<BeginMessage> ConnectAsync(SessionOptions options, CancellationToken ct)
         {
             ConnectStarted = true;
+            Options = options;
             var begin = await _connect.Task.WaitAsync(ct);
             IsConnected = true;
             OnConnected?.Invoke();
@@ -747,6 +796,17 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         {
             OnCapture?.Invoke();
             return Context;
+        }
+
+        /// <summary>What the focused control reports before its caret; null means it does not say.</summary>
+        public string? TextBeforeCaret { get; set; }
+
+        public ForegroundContext? CaretTarget { get; private set; }
+
+        public string? ReadTextBeforeCaret(ForegroundContext target)
+        {
+            CaretTarget = target;
+            return TextBeforeCaret;
         }
     }
 

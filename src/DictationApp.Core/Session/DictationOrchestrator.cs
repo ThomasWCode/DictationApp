@@ -25,6 +25,16 @@ public sealed class DictationOrchestrator : BackgroundService
     public static readonly TimeSpan SilentMicWarningAfter = TimeSpan.FromSeconds(2);
     public const string MicrophonePrivacyUri = "ms-settings:privacy-microphone";
 
+    /// <summary>
+    /// Silence before AssemblyAI may end a turn at terminal punctuation. Its default (100 ms) suits voice agents:
+    /// a pause to think mid-sentence became a full stop and a new capitalised sentence. Dictation needs no early
+    /// turn ends, because releasing the hotkey force-ends the last turn at once.
+    /// </summary>
+    public const int DictationMinTurnSilenceMs = 1000;
+
+    /// <summary>Silence after which a turn ends even without terminal punctuation (default 1000 ms).</summary>
+    public const int DictationMaxTurnSilenceMs = 3600;
+
     private readonly IHotkeyService _hotkeys;
     private readonly IAudioCaptureFactory _captures;
     private readonly IAudioSinkFactory _sinks;
@@ -650,7 +660,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 pasteMode = PasteModeFor(target, settings);
             }
 
-            var text = _formatter.Format(result.Text, target.WindowHandle);
+            var text = _formatter.Format(result.Text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
             record.InsertedText = text;
             InsertionResult insertion;
             if (target.IsEditable && !target.IsElevated)
@@ -906,7 +916,22 @@ public sealed class DictationOrchestrator : BackgroundService
         SpeechModel = settings.SpeechModel,
         Keyterms = KeytermsSelector.Select(settings.Dictionary),
         LanguageCodes = string.IsNullOrWhiteSpace(settings.LanguageCodes) ? null : settings.LanguageCodes,
+        MinTurnSilenceMs = DictationMinTurnSilenceMs,
+        MaxTurnSilenceMs = DictationMaxTurnSilenceMs,
     };
+
+    private string? SafeReadTextBeforeCaret(ForegroundContext target)
+    {
+        try
+        {
+            return _foreground.ReadTextBeforeCaret(target);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Reading the text before the caret failed");
+            return null;
+        }
+    }
 
     private ForegroundContext SafeCapture()
     {
