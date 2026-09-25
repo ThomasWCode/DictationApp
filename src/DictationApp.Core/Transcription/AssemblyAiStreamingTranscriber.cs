@@ -33,6 +33,9 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
     private volatile TaskCompletionSource<bool>? _endOfTurnTcs;
     private volatile bool _hasOpenTurn;
     private volatile bool _closing;
+
+    /// <summary>The socket failure, remembered even while closing so shutdown can report a truncated session.</summary>
+    private volatile Exception? _failure;
     private int _disposed;
 
     public AssemblyAiStreamingTranscriber(IApiKeyProvider keys, ILogger<AssemblyAiStreamingTranscriber> logger, Uri? endpoint = null)
@@ -120,6 +123,12 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
         var ws = _ws;
         if (ws is not { State: WebSocketState.Open })
         {
+            // The socket died after the user released: the transcript may be missing its tail.
+            if (_failure is { } lost)
+            {
+                throw new WebSocketException("Streaming connection lost: " + lost.Message, lost);
+            }
+
             return null;
         }
 
@@ -167,11 +176,19 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
         catch (Exception ex) when (ex is WebSocketException or InvalidOperationException)
         {
             _logger.LogWarning(ex, "Shutdown handshake failed");
+            _failure ??= ex;
         }
         finally
         {
             _logger.LogDebug("Shutdown handshake took {Elapsed} ms", sw.ElapsedMilliseconds);
             await CloseSocketAsync(ws).ConfigureAwait(false);
+        }
+
+        // No summary and the socket failed on the way: report it so the session is saved as Failed with its audio
+        // (Retry) instead of pasting a possibly truncated transcript.
+        if (termination is null && _failure is { } failure)
+        {
+            throw new WebSocketException("Streaming connection lost during shutdown: " + failure.Message, failure);
         }
 
         return termination;
@@ -276,6 +293,11 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
                     if (result.MessageType == WebSocketMessageType.Close)
                     {
                         _logger.LogDebug("Server closed the socket: {Status} {Description}", ws.CloseStatus, ws.CloseStatusDescription);
+                        if (ws.CloseStatus is not WebSocketCloseStatus.NormalClosure)
+                        {
+                            _failure ??= new WebSocketException($"Server closed the stream: {ws.CloseStatus} {ws.CloseStatusDescription}");
+                        }
+
                         if (!_closing)
                         {
                             OnFault(new WebSocketException($"Server closed the stream: {ws.CloseStatus} {ws.CloseStatusDescription}"));
@@ -301,6 +323,7 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
         }
         catch (Exception ex) when (ex is WebSocketException or IOException or ObjectDisposedException or InvalidOperationException)
         {
+            _failure ??= ex;
             if (!_closing)
             {
                 OnFault(ex);
@@ -324,7 +347,7 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
         }
         catch (JsonException ex)
         {
-            _logger.LogWarning(ex, "Unparseable streaming message: {Json}", Encoding.UTF8.GetString(json));
+            _logger.LogWarning(ex, "Unparseable streaming message ({Bytes} bytes)", json.Length);
             return;
         }
 
@@ -334,7 +357,8 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
                 _beginTcs.TrySetResult(begin);
                 break;
             case TurnMessage turn:
-                _logger.LogDebug("Turn {Order} eot={Eot} fmt={Fmt} conf={Conf:0.00}: {Text}", turn.TurnOrder, turn.EndOfTurn, turn.TurnIsFormatted, turn.EndOfTurnConfidence, turn.BestText);
+                // Length only: log files are kept 14 days, longer than the history retention may allow for dictated text.
+                _logger.LogDebug("Turn {Order} eot={Eot} fmt={Fmt} conf={Conf:0.00} chars={Chars}", turn.TurnOrder, turn.EndOfTurn, turn.TurnIsFormatted, turn.EndOfTurnConfidence, turn.BestText.Length);
                 _hasOpenTurn = !turn.EndOfTurn;
                 if (turn.EndOfTurn)
                 {

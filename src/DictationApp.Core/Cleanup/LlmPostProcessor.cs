@@ -160,7 +160,8 @@ public sealed class LlmPostProcessor : ITextPostProcessor
                 if (!validation.IsValid)
                 {
                     lastReason = $"{model}:invalid-{validation.Reason}";
-                    _logger.LogWarning("LLM output from {Model} rejected ({Reason}): {Output}", model, validation.Reason, Truncate(content, 200));
+                    // Reason and size only: no dictated text in the log files.
+                    _logger.LogWarning("LLM output from {Model} rejected ({Reason}, {Chars} chars)", model, validation.Reason, content?.Length ?? 0);
                     continue;
                 }
 
