@@ -2,6 +2,7 @@ using DictationApp.Core.Abstractions;
 using DictationApp.Core.Cleanup;
 using DictationApp.Core.Dictionary;
 using DictationApp.Core.Rules;
+using DictationApp.Core.Settings;
 
 namespace DictationApp.Core.Tests;
 
@@ -11,9 +12,41 @@ public class AppRulesResolverTests
         new(1, 1, process, "title", url, true, false, "test");
 
     [Fact]
-    public void Seed_rules_give_expected_tones()
+    public void New_settings_have_no_app_rules_so_every_app_uses_the_defaults()
     {
-        var rules = DefaultAppRules.Seed();
+        var settings = new AppSettings();
+        Assert.Empty(settings.AppRules);
+        var resolved = AppRulesResolver.Resolve(Ctx("OUTLOOK"), settings.AppRules, Tone.Casual, CleanupLevel.High, PasteMode.CtrlV);
+        Assert.Equal(Tone.Casual, resolved.Tone);
+        Assert.Equal(CleanupLevel.High, resolved.Level);
+        Assert.Equal("default", resolved.MatchedBy);
+    }
+
+    [Fact]
+    public void Legacy_seeded_targets_are_recognised_whatever_their_style()
+    {
+        Assert.True(LegacyAppRules.IsSeededTarget(new AppRule { ProcessGlob = "outlook", Tone = Tone.Casual }));
+        Assert.True(LegacyAppRules.IsSeededTarget(new AppRule { UrlHost = "mail.google.com" }));
+        Assert.False(LegacyAppRules.IsSeededTarget(new AppRule { ProcessGlob = "notepad" }));
+        Assert.False(LegacyAppRules.IsSeededTarget(new AppRule { UrlHost = "example.com" }));
+    }
+
+    [Fact]
+    public void Only_unmodified_seeds_are_treated_as_seeds()
+    {
+        var seed = LegacyAppRules.Seed().First(r => r.ProcessGlob == "OUTLOOK");
+        Assert.True(LegacyAppRules.IsUnmodifiedSeed(seed));
+        Assert.True(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "outlook", Tone = Tone.Casual, Level = CleanupLevel.High, Hint = seed.Hint })); // remembered style
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "OUTLOOK", Tone = seed.Tone, Level = seed.Level, Hint = seed.Hint, PasteMode = PasteMode.CtrlShiftV }));
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "OUTLOOK", Tone = seed.Tone, Level = seed.Level, Hint = "Formal emails to my team." }));
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "OUTLOOK", Tone = seed.Tone, Level = seed.Level, Hint = seed.Hint, Enabled = false }));
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "notepad" }));
+    }
+
+    [Fact]
+    public void Legacy_seed_rules_resolve_as_before()
+    {
+        var rules = LegacyAppRules.Seed();
         Assert.Equal(Tone.Formal, AppRulesResolver.Resolve(Ctx("OUTLOOK"), rules, Tone.Neutral, CleanupLevel.Light, PasteMode.CtrlV).Tone);
         Assert.Equal(Tone.Casual, AppRulesResolver.Resolve(Ctx("ms-teams"), rules, Tone.Neutral, CleanupLevel.Light, PasteMode.CtrlV).Tone);
         Assert.Equal(Tone.Formal, AppRulesResolver.Resolve(Ctx("chrome", "https://mail.google.com/mail/u/0/#inbox"), rules, Tone.Neutral, CleanupLevel.Light, PasteMode.CtrlV).Tone);

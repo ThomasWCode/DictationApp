@@ -529,6 +529,14 @@ public sealed class DictationOrchestrator : BackgroundService
             // 4. Finalising: graceful handshake bounded by the hard cap.
             PublishSession(session, DictationState.Finalising, "Finishing");
             var termination = await transcriber.ShutdownAsync(HandshakeCap, ct).ConfigureAwait(false);
+
+            // A socket fault after the release is no longer being awaited; without a Termination summary the
+            // transcript may be missing its tail, so save it as Failed (audio kept for Retry) rather than paste it.
+            if (termination is null && session.Faulted.IsCompleted)
+            {
+                await FailAsync(session, record, capture, sink, transcriber, session.Faulted.Result, ct).ConfigureAwait(false);
+                return;
+            }
             var audioSeconds = termination?.AudioDurationSeconds ?? session.AudioDuration.TotalSeconds;
             record.DurationMs = (int)(session.AudioDuration.TotalMilliseconds);
             record.CostEstimate = CostEstimator.SttCost(settings.SpeechModel, TimeSpan.FromSeconds(audioSeconds));
@@ -574,13 +582,17 @@ public sealed class DictationOrchestrator : BackgroundService
             // 6. Inserting. Re-verify the foreground window; keep the tone chosen at the start.
             PublishSession(session, DictationState.Inserting, "Inserting");
             var target = SafeCapture();
+            var pasteMode = session.Rule.PasteMode;
             if (target.WindowHandle == 0 || target.WindowHandle == session.Context.WindowHandle)
             {
                 target = session.Context with { IsEditable = target.WindowHandle == 0 ? session.Context.IsEditable : target.IsEditable, EditableReason = target.WindowHandle == 0 ? session.Context.EditableReason : target.EditableReason };
             }
             else
             {
+                // Tone and cleanup stay as chosen at the start, but the paste keystroke belongs to the window the text
+                // lands in (e.g. Ctrl+Shift+V for an app whose rule asks for plain-text paste).
                 _logger.LogInformation("Foreground changed during dictation: {From} -> {To}", session.Context.ProcessName, target.ProcessName);
+                pasteMode = PasteModeFor(target, settings);
             }
 
             var text = _formatter.Format(result.Text, target.WindowHandle);
@@ -588,7 +600,7 @@ public sealed class DictationOrchestrator : BackgroundService
             InsertionResult insertion;
             if (target.IsEditable && !target.IsElevated)
             {
-                insertion = await _inserter.InsertAsync(text, target, session.Rule.PasteMode, ct).ConfigureAwait(false);
+                insertion = await _inserter.InsertAsync(text, target, pasteMode, ct).ConfigureAwait(false);
             }
             else
             {
@@ -732,6 +744,13 @@ public sealed class DictationOrchestrator : BackgroundService
                 _notifier.Toast("Dictation failed", error.Message + " The recording is saved in History.", ToastKind.Warning);
             }
         }
+        else if (!string.IsNullOrWhiteSpace(record.RawTranscript))
+        {
+            // No audio ("Store audio" off, or nothing recorded) but some words were heard: keep them in History,
+            // where they can still be copied. Retry needs audio, so it stays unavailable for this record.
+            await SaveRecordAsync(record).ConfigureAwait(false);
+            _notifier.Toast("Dictation failed", error.Message + " What was heard so far is saved in History.", ToastKind.Warning);
+        }
         else
         {
             _notifier.Toast("Dictation failed", error.Message, ToastKind.Error);
@@ -823,6 +842,10 @@ public sealed class DictationOrchestrator : BackgroundService
         }
     }
 
+    /// <summary>The paste mode the app rules give <paramref name="target"/> (used when text lands somewhere other than where it started).</summary>
+    public static PasteMode PasteModeFor(ForegroundContext target, AppSettings settings) =>
+        AppRulesResolver.Resolve(target, settings.AppRules, settings.DefaultTone, settings.DefaultCleanupLevel, settings.PasteMode).PasteMode;
+
     private SessionOptions BuildSessionOptions(AppSettings settings) => new()
     {
         SpeechModel = settings.SpeechModel,
@@ -889,15 +912,20 @@ public sealed class DictationOrchestrator : BackgroundService
             return;
         }
 
-        var tone = session.Tone;
-        var level = session.Level;
         var matched = session.Rule.MatchedRule;
         _ = Task.Run(async () =>
         {
+            // Each change starts one of these saves and they may finish in any order, so each writes the session's
+            // latest tone and level rather than the values of the change that started it: the last to run wins with
+            // the newest choice, never an older one.
+            var tone = session.Tone;
+            var level = session.Level;
             try
             {
                 await _settings.UpdateAsync(s =>
                 {
+                    tone = session.Tone;
+                    level = session.Level;
                     var rule = matched is null
                         ? null
                         : s.AppRules.FirstOrDefault(r =>

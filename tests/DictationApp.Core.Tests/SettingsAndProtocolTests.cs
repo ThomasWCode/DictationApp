@@ -105,6 +105,11 @@ public class StreamingMessageParserTests
         var error = StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"error\":\"Invalid API key\"}"));
         Assert.Equal("Invalid API key", ((ErrorMessage)error!).Error);
 
+        // Typed error frames fail the session too, whatever shape the detail has.
+        Assert.Equal("Invalid API key", Assert.IsType<ErrorMessage>(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"Error\",\"error\":\"Invalid API key\"}"))).Error);
+        Assert.Contains("1008", Assert.IsType<ErrorMessage>(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"Error\",\"error\":{\"code\":1008}}"))).Error);
+        Assert.Equal("unknown error", Assert.IsType<ErrorMessage>(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"Error\"}"))).Error);
+
         Assert.Null(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"SpeechStarted\"}")));
         Assert.Null(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("[]")));
     }
@@ -123,6 +128,20 @@ public sealed class JsonSettingsStoreTests : IDisposable
         catch (IOException)
         {
         }
+    }
+
+    [Fact]
+    public async Task Concurrent_updates_are_never_lost()
+    {
+        var path = Path.Combine(_dir, "settings.json");
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+        await store.UpdateAsync(s => s.Dictionary.Add(new Core.Dictionary.DictionaryTerm { Term = "LSHTM" }));
+
+        // Read-modify-write racing on thread-pool threads, like a remembered style change and a dictionary bump.
+        await Task.WhenAll(Enumerable.Range(0, 50).Select(_ => Task.Run(() => store.UpdateAsync(s => s.Dictionary[0].UseCount++))));
+
+        Assert.Equal(50, store.Current.Dictionary[0].UseCount);
+        Assert.Equal(50, new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance).Current.Dictionary[0].UseCount);
     }
 
     [Fact]
@@ -225,7 +244,7 @@ public sealed class JsonSettingsStoreTests : IDisposable
         await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 1, \"LlmModel\": \"gemini-2.5-flash-lite\", \"LlmFallbackModels\": [\"gemini-2.5-flash\"], \"HotkeyMode\": \"Hold\" }");
         var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
 
-        Assert.Equal(2, store.Current.SchemaVersion);
+        Assert.Equal(3, store.Current.SchemaVersion);
         Assert.Equal(AppSettings.DefaultLlmModel, store.Current.LlmModel);
         Assert.Equal(AppSettings.DefaultLlmBaseUrl, store.Current.LlmBaseUrl);
         Assert.Equal("openai/gpt-oss-120b", store.Current.LlmModel);
@@ -258,6 +277,45 @@ public sealed class JsonSettingsStoreTests : IDisposable
 
         Assert.Equal("custom/model", store.Current.LlmModel);
         Assert.Equal(FlowBarMode.Minimal, store.Current.FlowBarMode);
+        Directory.Delete(_migrationDir, recursive: true);
+    }
+
+    [Fact]
+    public async Task Schema_v2_seeded_app_rules_are_removed_and_user_rules_kept()
+    {
+        Directory.CreateDirectory(_migrationDir);
+        var path = Path.Combine(_migrationDir, "settings.json");
+        // As 0.2 wrote it: seeded rules (OUTLOOK's tone and level altered by "remember style", which still counts as
+        // a seed), seeded rules the user customised (paste mode, hint, switched off), and one the user added.
+        await File.WriteAllTextAsync(path, """
+            { "SchemaVersion": 2, "AppRules": [
+              { "ProcessGlob": "OUTLOOK", "Tone": "Casual", "Level": "High", "Hint": "This is an email.", "Enabled": true },
+              { "UrlHost": "mail.google.com", "Tone": "Formal", "Level": "Medium", "Hint": "This is an email.", "Enabled": true },
+              { "ProcessGlob": "ms-teams", "Tone": "Casual", "Level": "Light", "Hint": "This is a chat message.", "Enabled": true },
+              { "ProcessGlob": "WINWORD", "Tone": "Formal", "Level": "Medium", "PasteMode": "CtrlShiftV", "Hint": "This is a document.", "Enabled": true },
+              { "ProcessGlob": "slack", "Tone": "Casual", "Level": "Light", "Hint": "Keep it short.", "Enabled": true },
+              { "ProcessGlob": "Code", "Tone": "Neutral", "Level": "None", "Hint": "This is a code editor.", "Enabled": false },
+              { "ProcessGlob": "notepad", "Tone": "Formal", "Enabled": true }
+            ] }
+            """);
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+
+        Assert.Equal(3, store.Current.SchemaVersion);
+        Assert.Equal(["WINWORD", "slack", "Code", "notepad"], store.Current.AppRules.Select(r => r.ProcessGlob));
+        Assert.Equal(Tone.Formal, store.Current.AppRules[^1].Tone);
+        Directory.Delete(_migrationDir, recursive: true);
+    }
+
+    [Fact]
+    public async Task Schema_v3_rules_are_not_migrated_again()
+    {
+        Directory.CreateDirectory(_migrationDir);
+        var path = Path.Combine(_migrationDir, "settings.json");
+        await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 3, \"AppRules\": [ { \"ProcessGlob\": \"OUTLOOK\", \"Tone\": \"Formal\", \"Enabled\": true } ] }");
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+
+        // Added back by the user after the migration: it stays.
+        Assert.Equal("OUTLOOK", Assert.Single(store.Current.AppRules).ProcessGlob);
         Directory.Delete(_migrationDir, recursive: true);
     }
 

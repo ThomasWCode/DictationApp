@@ -232,6 +232,103 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Socket_failure_during_shutdown_keeps_audio_as_failed_instead_of_pasting()
+    {
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _capture.Emit(1);
+        _transcriber.RaiseTurn(0, "the start of a longer", endOfTurn: false);
+        _transcriber.ShutdownError = new System.Net.WebSockets.WebSocketException("Streaming connection lost during shutdown");
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+
+        Assert.Null(_inserter.LastText);
+        var record = Assert.Single(_history.Records);
+        Assert.Equal(RecordStatus.Failed, record.Status);
+        Assert.NotNull(record.AudioPath);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Network error");
+    }
+
+    [Fact]
+    public async Task Fault_after_release_without_summary_is_not_pasted()
+    {
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _capture.Emit(1);
+        _transcriber.RaiseTurn(0, "cut off", endOfTurn: false);
+        _transcriber.FaultBeforeShutdown = true;
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+
+        Assert.Null(_inserter.LastText);
+        Assert.Equal(RecordStatus.Failed, Assert.Single(_history.Records).Status);
+    }
+
+    [Fact]
+    public async Task Paste_mode_follows_the_window_the_text_lands_in()
+    {
+        await _settings.UpdateAsync(s => s.AppRules = [new Core.Rules.AppRule { ProcessGlob = "WINWORD", PasteMode = PasteMode.CtrlShiftV }]);
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _capture.Emit(1);
+        _transcriber.RaiseTurn(0, "Moved windows.", endOfTurn: true, formatted: true);
+        _foreground.Context = new ForegroundContext(99, 8, "WINWORD", "Document1 - Word", null, true, false, "uia:Document");
+        _clock.Advance(TimeSpan.FromSeconds(2));
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+
+        Assert.Equal(PasteMode.CtrlShiftV, _inserter.LastPasteMode);
+    }
+
+    [Fact]
+    public async Task Failure_without_audio_keeps_the_partial_transcript()
+    {
+        await _settings.UpdateAsync(s => s.StoreAudio = false);
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _capture.Emit(1);
+        _transcriber.RaiseTurn(0, "half a sentence", endOfTurn: false);
+        await WaitFor(() => _hub.Current.LiveText == "half a sentence", "live text");
+        _transcriber.Fault(new System.Net.WebSockets.WebSocketException("dropped"));
+        await WaitForIdleSession();
+
+        var record = Assert.Single(_history.Records);
+        Assert.Equal(RecordStatus.Failed, record.Status);
+        Assert.Equal("half a sentence", record.RawTranscript);
+        Assert.Null(record.AudioPath);
+        Assert.Null(_sinks.Last);
+        Assert.Contains(_notifier.Toasts, t => t.Message.Contains("saved in History", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Failure_with_neither_audio_nor_words_only_toasts()
+    {
+        await _settings.UpdateAsync(s => s.StoreAudio = false);
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.FailConnect(new System.Net.WebSockets.WebSocketException("offline"));
+        await WaitForIdleSession();
+
+        Assert.Empty(_history.Records);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Dictation failed");
+    }
+
+    [Fact]
     public async Task Nothing_heard_writes_no_record_and_removes_audio()
     {
         await StartAsync();
@@ -536,10 +633,27 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public Task UpdateConfigurationAsync(IReadOnlyList<string>? keyterms, string? prompt, CancellationToken ct) => Task.CompletedTask;
 
+        /// <summary>When set, shutdown fails like a socket that dropped during the handshake.</summary>
+        public Exception? ShutdownError { get; set; }
+
+        /// <summary>Raise a socket fault after the release, when the session no longer awaits it, and return no summary.</summary>
+        public bool FaultBeforeShutdown { get; set; }
+
         public Task<TerminationMessage?> ShutdownAsync(TimeSpan hardCap, CancellationToken ct)
         {
             ShutdownCalled = true;
             IsConnected = false;
+            if (ShutdownError is { } error)
+            {
+                return Task.FromException<TerminationMessage?>(error);
+            }
+
+            if (FaultBeforeShutdown)
+            {
+                Fault(new System.Net.WebSockets.WebSocketException("socket dropped"));
+                return Task.FromResult<TerminationMessage?>(null);
+            }
+
             return Task.FromResult<TerminationMessage?>(new TerminationMessage { AudioDurationSeconds = 1.5, SessionDurationSeconds = 2 });
         }
 
@@ -573,9 +687,12 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public string? LastText { get; private set; }
 
+        public PasteMode? LastPasteMode { get; private set; }
+
         public Task<InsertionResult> InsertAsync(string text, ForegroundContext target, PasteMode pasteMode, CancellationToken ct)
         {
             LastText = text;
+            LastPasteMode = pasteMode;
             return Task.FromResult(new InsertionResult(InsertionOutcome.Inserted));
         }
     }
