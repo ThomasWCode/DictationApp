@@ -32,6 +32,18 @@ public class AppRulesResolverTests
     }
 
     [Fact]
+    public void Only_unmodified_seeds_are_treated_as_seeds()
+    {
+        var seed = LegacyAppRules.Seed().First(r => r.ProcessGlob == "OUTLOOK");
+        Assert.True(LegacyAppRules.IsUnmodifiedSeed(seed));
+        Assert.True(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "outlook", Tone = Tone.Casual, Level = CleanupLevel.High, Hint = seed.Hint })); // remembered style
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "OUTLOOK", Tone = seed.Tone, Level = seed.Level, Hint = seed.Hint, PasteMode = PasteMode.CtrlShiftV }));
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "OUTLOOK", Tone = seed.Tone, Level = seed.Level, Hint = "Formal emails to my team." }));
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "OUTLOOK", Tone = seed.Tone, Level = seed.Level, Hint = seed.Hint, Enabled = false }));
+        Assert.False(LegacyAppRules.IsUnmodifiedSeed(new AppRule { ProcessGlob = "notepad" }));
+    }
+
+    [Fact]
     public void Legacy_seed_rules_resolve_as_before()
     {
         var rules = LegacyAppRules.Seed();

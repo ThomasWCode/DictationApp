@@ -84,9 +84,22 @@ public static class AppRulesResolver
 public static class LegacyAppRules
 {
     /// <summary>True when <paramref name="rule"/> targets an app or host that was seeded, whatever its tone or level now.</summary>
-    public static bool IsSeededTarget(AppRule rule) => Seed().Any(seed =>
+    public static bool IsSeededTarget(AppRule rule) => Seed().Any(seed => SameTarget(seed, rule));
+
+    /// <summary>
+    /// True when <paramref name="rule"/> is still one of the seeded rules: same target, paste mode, hint and on/off
+    /// state. Tone and level may differ, because "Remember tone and cleanup changes" rewrites those on its own. A
+    /// seeded-target rule whose paste mode, hint or enabled state was changed was customised by the user and is kept.
+    /// </summary>
+    public static bool IsUnmodifiedSeed(AppRule rule) => Seed().Any(seed =>
+        SameTarget(seed, rule)
+        && seed.PasteMode == rule.PasteMode
+        && string.Equals(seed.Hint?.Trim(), rule.Hint?.Trim(), StringComparison.Ordinal)
+        && seed.Enabled == rule.Enabled);
+
+    private static bool SameTarget(AppRule seed, AppRule rule) =>
         string.Equals(seed.ProcessGlob?.Trim(), rule.ProcessGlob?.Trim(), StringComparison.OrdinalIgnoreCase)
-        && string.Equals(seed.UrlHost?.Trim(), rule.UrlHost?.Trim(), StringComparison.OrdinalIgnoreCase));
+        && string.Equals(seed.UrlHost?.Trim(), rule.UrlHost?.Trim(), StringComparison.OrdinalIgnoreCase);
 
     public static List<AppRule> Seed() =>
     [
