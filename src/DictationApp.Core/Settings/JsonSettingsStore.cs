@@ -21,6 +21,8 @@ public sealed class JsonSettingsStore : ISettingsStore
     };
 
     private readonly ILogger<JsonSettingsStore> _logger;
+    private const int MoveAttempts = 6;
+
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     public JsonSettingsStore(string filePath, ILogger<JsonSettingsStore> logger)
@@ -41,17 +43,7 @@ public sealed class JsonSettingsStore : ISettingsStore
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var dir = Path.GetDirectoryName(FilePath);
-            if (!string.IsNullOrEmpty(dir))
-            {
-                Directory.CreateDirectory(dir);
-            }
-
-            var tmp = FilePath + ".tmp";
-            var json = JsonSerializer.Serialize(settings, Options);
-            await File.WriteAllTextAsync(tmp, json, ct).ConfigureAwait(false);
-            File.Move(tmp, FilePath, overwrite: true);
-            Current = settings;
+            await WriteAsync(settings, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -61,11 +53,56 @@ public sealed class JsonSettingsStore : ISettingsStore
         Changed?.Invoke(settings);
     }
 
+    /// <summary>
+    /// Read-modify-write under the gate: the copy is taken after any concurrent update has been written, so two
+    /// updates racing (a remembered style change and a dictionary use count, say) can never overwrite each other.
+    /// </summary>
     public async Task UpdateAsync(Action<AppSettings> mutate, CancellationToken ct = default)
     {
-        var copy = Current.Clone();
-        mutate(copy);
-        await SaveAsync(copy, ct).ConfigureAwait(false);
+        AppSettings copy;
+        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            copy = Current.Clone();
+            mutate(copy);
+            await WriteAsync(copy, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        Changed?.Invoke(copy);
+    }
+
+    private async Task WriteAsync(AppSettings settings, CancellationToken ct)
+    {
+        var dir = Path.GetDirectoryName(FilePath);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            Directory.CreateDirectory(dir);
+        }
+
+        var tmp = FilePath + ".tmp";
+        var json = JsonSerializer.Serialize(settings, Options);
+        await File.WriteAllTextAsync(tmp, json, ct).ConfigureAwait(false);
+
+        // Replacing a file that was written moments ago can be refused while another process (antivirus, the search
+        // indexer) still has it open; saves in quick succession hit that, so retry briefly before giving up.
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(tmp, FilePath, overwrite: true);
+                break;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < MoveAttempts)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(15 * attempt), ct).ConfigureAwait(false);
+            }
+        }
+
+        Current = settings;
     }
 
     /// <summary>

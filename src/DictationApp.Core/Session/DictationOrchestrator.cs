@@ -912,15 +912,20 @@ public sealed class DictationOrchestrator : BackgroundService
             return;
         }
 
-        var tone = session.Tone;
-        var level = session.Level;
         var matched = session.Rule.MatchedRule;
         _ = Task.Run(async () =>
         {
+            // Each change starts one of these saves and they may finish in any order, so each writes the session's
+            // latest tone and level rather than the values of the change that started it: the last to run wins with
+            // the newest choice, never an older one.
+            var tone = session.Tone;
+            var level = session.Level;
             try
             {
                 await _settings.UpdateAsync(s =>
                 {
+                    tone = session.Tone;
+                    level = session.Level;
                     var rule = matched is null
                         ? null
                         : s.AppRules.FirstOrDefault(r =>
