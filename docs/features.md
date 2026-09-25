@@ -77,14 +77,22 @@ The endpoint and models are editable, so any OpenAI-compatible service can repla
 ## App-aware rules
 
 Rules map a process name (wildcards allowed) or a browser tab host to a tone, cleanup level, paste mode and a
-hint for the LLM. A URL rule beats a process rule, which beats the defaults; unset fields inherit. Seeded rules:
+hint for the LLM. A URL rule beats a process rule, which beats the defaults; unset fields inherit.
+
+The list starts **empty**: every app follows the Style tab's default tone and cleanup level until you add it
+under Settings › App rules › Add app (a new row starts from the current defaults, so you only change what should
+differ). Examples of useful rules:
 
 | Target | Tone | Level |
 |---|---|---|
-| Outlook (classic and new), Gmail, Outlook web | Formal | Medium |
-| Teams, Slack, WhatsApp (desktop and web) | Casual | Light |
-| Word, Google Docs | Formal | Medium |
-| VS Code, Windows Terminal, PowerShell, cmd | Neutral | None |
+| `OUTLOOK`, `olk`, host `mail.google.com` | Formal | Medium |
+| `ms-teams`, `slack`, `WhatsApp`, host `web.whatsapp.com` | Casual | Light |
+| `WINWORD`, host `docs.google.com` | Formal | Medium |
+| `Code`, `WindowsTerminal`, `pwsh`, `cmd` | Neutral | None |
+
+Versions 0.1 and 0.2 seeded rules like these into every settings file. Settings schema 3 removes those seeded
+entries on upgrade, including ones whose tone or level "Remember tone and cleanup changes" altered on its own.
+A seeded rule whose paste mode, hint or on/off switch you changed is kept, as is every rule for another app.
 
 For Chrome, Edge, Brave, Vivaldi, Opera and Firefox the address bar is read through UI Automation (time-boxed
 to 250 ms) so host rules work per tab.

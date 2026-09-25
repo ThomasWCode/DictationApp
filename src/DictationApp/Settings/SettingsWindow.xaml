@@ -189,12 +189,12 @@
       <!-- App rules -->
       <TabItem Header="App rules">
         <DockPanel Margin="18,14">
-          <TextBlock DockPanel.Dock="Top" Text="Per-application defaults" Style="{StaticResource Heading}" />
-          <TextBlock DockPanel.Dock="Top" Style="{StaticResource Hint}" Text="Match by process name (wildcards * and ?) or by browser tab host. A URL rule beats a process rule; the first match of each kind wins. Empty tone/level cells inherit the defaults." />
+          <TextBlock DockPanel.Dock="Top" Text="Per-application settings" Style="{StaticResource Heading}" />
+          <TextBlock DockPanel.Dock="Top" Style="{StaticResource Hint}" Text="Empty by default: every app uses the tone and cleanup level from the Style tab. Add an app here to give it different settings. Match by process name (wildcards * and ?, e.g. OUTLOOK, ms-teams) or by browser tab host (e.g. mail.google.com). A URL rule beats a process rule; the first match of each kind wins." />
           <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,8,0,0">
-            <Button Content="Add rule" Command="{Binding AddRuleCommand}" />
+            <Button Content="Add app" Command="{Binding AddRuleCommand}" />
             <Button Content="Remove selected" Command="{Binding RemoveRuleCommand}" CommandParameter="{Binding SelectedRule}" />
-            <Button Content="Reset to defaults" Command="{Binding ResetRulesCommand}" />
+            <Button Content="Remove all" Command="{Binding ResetRulesCommand}" />
           </StackPanel>
           <DataGrid ItemsSource="{Binding AppRules}" SelectedItem="{Binding SelectedRule}">
             <DataGrid.Columns>

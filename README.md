@@ -10,8 +10,9 @@ clipboard with a toast. Native .NET 8 + WPF, tray-resident, ~60 MB idle.
   Neutral/Formal/Casual) with a fallback chain and strict output validation. If Groq is unavailable the raw
   transcript is inserted and the Flow bar shows "cleanup skipped". The overlay can be the full bar, a tiny
   level-only pill, or hidden.
-- **App-aware**: per-application rules (Outlook → Formal, Teams → Casual, VS Code → no cleanup…), browser tab
-  host detection for Gmail/Docs, tone and level chips on the Flow bar, arrow keys to override while holding.
+- **App-aware**: optional per-application rules (none by default, so every app follows your Style settings; add
+  e.g. Outlook → Formal or Teams → Casual), browser tab host detection for Gmail/Docs, tone and level chips on
+  the Flow bar, arrow keys to override while holding.
 - **History**: every dictation with searchable text and playable audio, retry for failed ones, "Undo AI edit",
   configurable retention.
 - **Personal dictionary** with a "Correct last dictation" dialog that diffs your edits into new terms.
@@ -79,6 +80,6 @@ update check uses. The executable is unsigned; SmartScreen will show "More info 
 src/DictationApp.Core      platform-independent: transcriber, state machine, cleanup, rules, history (net8.0)
 src/DictationApp.Windows   Win32/UIA/WASAPI/clipboard adapters (net8.0-windows)
 src/DictationApp           WPF tray app: Flow bar, Settings, History, first-run wizard (net8.0-windows)
-tests/                     xUnit: 129 Core + 14 Windows tests
+tests/                     xUnit: 154 Core + 21 Windows tests
 build/                     icon generator, pack.ps1
 ```

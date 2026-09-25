@@ -13,11 +13,11 @@ runs the whole pipeline with a WAV in place of the microphone and pastes into wh
 | Target | Expected | Result |
 |---|---|---|
 | Notepad (Win11) | UIA reports Edit/Document; text pasted at caret | |
-| Word, Outlook desktop (new + classic) | Rich paste OK; Formal tone chip pre-selected (app rule) | |
-| Chrome/Edge: Gmail compose | URL rule → Formal; address bar read in log | |
+| Word, Outlook desktop (new + classic) | Rich paste OK; default tone chip (Formal only if you added an app rule) | |
+| Chrome/Edge: Gmail compose | Address bar read in log; a `mail.google.com` rule, if added, applies | |
 | Chrome/Edge: plain textarea | Inserted | |
 | Chrome/Edge: address bar (omnibox) | Inserted into omnibox | |
-| Teams, Slack, WhatsApp desktop | Electron; Casual tone chip pre-selected | |
+| Teams, Slack, WhatsApp desktop | Electron; default tone chip (Casual only if you added an app rule) | |
 | VS Code | Level None (no LLM call, see log) | |
 | Windows Terminal, PowerShell console | Caret fallback / allowlist; inserted | |
 | Elevated Notepad (Run as administrator) | Toast "Target is elevated, text copied"; clipboard holds text | |
