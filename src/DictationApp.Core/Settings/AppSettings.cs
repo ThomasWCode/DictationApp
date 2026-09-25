@@ -28,7 +28,7 @@ public sealed class AppSettings
     public const string DefaultLlmBaseUrl = "https://api.groq.com/openai/v1/";
     public const string DefaultLlmModel = "openai/gpt-oss-120b";
 
-    public int SchemaVersion { get; set; } = 2;
+    public int SchemaVersion { get; set; } = 3;
 
     /// <summary>AssemblyAI key (transcription). DPAPI-protected, base64. Never the plaintext key.</summary>
     public string? ApiKeyProtected { get; set; }
@@ -92,7 +92,8 @@ public sealed class AppSettings
 
     public List<DictionaryTerm> Dictionary { get; set; } = [];
 
-    public List<AppRule> AppRules { get; set; } = DefaultAppRules.Seed();
+    /// <summary>Per-app overrides. Empty by default: every app follows the Style defaults until the user adds one.</summary>
+    public List<AppRule> AppRules { get; set; } = [];
 
     [JsonIgnore]
     public HotkeyChord HotkeyChord => HotkeyChord.TryParse(Hotkey, out var chord) ? chord : HotkeyChord.Default;

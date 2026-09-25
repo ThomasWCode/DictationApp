@@ -105,6 +105,11 @@ public class StreamingMessageParserTests
         var error = StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"error\":\"Invalid API key\"}"));
         Assert.Equal("Invalid API key", ((ErrorMessage)error!).Error);
 
+        // Typed error frames fail the session too, whatever shape the detail has.
+        Assert.Equal("Invalid API key", Assert.IsType<ErrorMessage>(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"Error\",\"error\":\"Invalid API key\"}"))).Error);
+        Assert.Contains("1008", Assert.IsType<ErrorMessage>(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"Error\",\"error\":{\"code\":1008}}"))).Error);
+        Assert.Equal("unknown error", Assert.IsType<ErrorMessage>(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"Error\"}"))).Error);
+
         Assert.Null(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("{\"type\":\"SpeechStarted\"}")));
         Assert.Null(StreamingMessageParser.Parse(Encoding.UTF8.GetBytes("[]")));
     }
@@ -225,7 +230,7 @@ public sealed class JsonSettingsStoreTests : IDisposable
         await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 1, \"LlmModel\": \"gemini-2.5-flash-lite\", \"LlmFallbackModels\": [\"gemini-2.5-flash\"], \"HotkeyMode\": \"Hold\" }");
         var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
 
-        Assert.Equal(2, store.Current.SchemaVersion);
+        Assert.Equal(3, store.Current.SchemaVersion);
         Assert.Equal(AppSettings.DefaultLlmModel, store.Current.LlmModel);
         Assert.Equal(AppSettings.DefaultLlmBaseUrl, store.Current.LlmBaseUrl);
         Assert.Equal("openai/gpt-oss-120b", store.Current.LlmModel);
@@ -258,6 +263,42 @@ public sealed class JsonSettingsStoreTests : IDisposable
 
         Assert.Equal("custom/model", store.Current.LlmModel);
         Assert.Equal(FlowBarMode.Minimal, store.Current.FlowBarMode);
+        Directory.Delete(_migrationDir, recursive: true);
+    }
+
+    [Fact]
+    public async Task Schema_v2_seeded_app_rules_are_removed_and_user_rules_kept()
+    {
+        Directory.CreateDirectory(_migrationDir);
+        var path = Path.Combine(_migrationDir, "settings.json");
+        // As 0.2 wrote it: the seeded rules (one altered by "remember style"), plus one the user added.
+        await File.WriteAllTextAsync(path, """
+            { "SchemaVersion": 2, "AppRules": [
+              { "ProcessGlob": "OUTLOOK", "Tone": "Casual", "Level": "High", "Enabled": true },
+              { "UrlHost": "mail.google.com", "Tone": "Formal", "Level": "Medium", "Enabled": true },
+              { "ProcessGlob": "ms-teams", "Tone": "Casual", "Level": "Light", "Enabled": true },
+              { "ProcessGlob": "notepad", "Tone": "Formal", "Enabled": true }
+            ] }
+            """);
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+
+        Assert.Equal(3, store.Current.SchemaVersion);
+        var kept = Assert.Single(store.Current.AppRules);
+        Assert.Equal("notepad", kept.ProcessGlob);
+        Assert.Equal(Tone.Formal, kept.Tone);
+        Directory.Delete(_migrationDir, recursive: true);
+    }
+
+    [Fact]
+    public async Task Schema_v3_rules_are_not_migrated_again()
+    {
+        Directory.CreateDirectory(_migrationDir);
+        var path = Path.Combine(_migrationDir, "settings.json");
+        await File.WriteAllTextAsync(path, "{ \"SchemaVersion\": 3, \"AppRules\": [ { \"ProcessGlob\": \"OUTLOOK\", \"Tone\": \"Formal\", \"Enabled\": true } ] }");
+        var store = new JsonSettingsStore(path, NullLogger<JsonSettingsStore>.Instance);
+
+        // Added back by the user after the migration: it stays.
+        Assert.Equal("OUTLOOK", Assert.Single(store.Current.AppRules).ProcessGlob);
         Directory.Delete(_migrationDir, recursive: true);
     }
 

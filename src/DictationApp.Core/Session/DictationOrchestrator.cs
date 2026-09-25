@@ -732,6 +732,13 @@ public sealed class DictationOrchestrator : BackgroundService
                 _notifier.Toast("Dictation failed", error.Message + " The recording is saved in History.", ToastKind.Warning);
             }
         }
+        else if (!string.IsNullOrWhiteSpace(record.RawTranscript))
+        {
+            // No audio ("Store audio" off, or nothing recorded) but some words were heard: keep them in History,
+            // where they can still be copied. Retry needs audio, so it stays unavailable for this record.
+            await SaveRecordAsync(record).ConfigureAwait(false);
+            _notifier.Toast("Dictation failed", error.Message + " What was heard so far is saved in History.", ToastKind.Warning);
+        }
         else
         {
             _notifier.Toast("Dictation failed", error.Message, ToastKind.Error);

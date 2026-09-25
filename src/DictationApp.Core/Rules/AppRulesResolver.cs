@@ -77,8 +77,17 @@ public static class AppRulesResolver
     }
 }
 
-public static class DefaultAppRules
+/// <summary>
+/// The rules versions 0.1 and 0.2 seeded into every new settings file. Since 0.3 the list starts empty and every
+/// app follows the Style defaults; these are kept only so the settings migration can recognise and remove them.
+/// </summary>
+public static class LegacyAppRules
 {
+    /// <summary>True when <paramref name="rule"/> targets an app or host that was seeded, whatever its tone or level now.</summary>
+    public static bool IsSeededTarget(AppRule rule) => Seed().Any(seed =>
+        string.Equals(seed.ProcessGlob?.Trim(), rule.ProcessGlob?.Trim(), StringComparison.OrdinalIgnoreCase)
+        && string.Equals(seed.UrlHost?.Trim(), rule.UrlHost?.Trim(), StringComparison.OrdinalIgnoreCase));
+
     public static List<AppRule> Seed() =>
     [
         new() { ProcessGlob = "OUTLOOK", Tone = Tone.Formal, Level = CleanupLevel.Medium, Hint = "This is an email." },

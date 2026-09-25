@@ -423,7 +423,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void AddRule() => AppRules.Add(new AppRule { ProcessGlob = "newapp", Tone = Tone.Neutral, Level = CleanupLevel.Light });
+    private void AddRule()
+    {
+        // A new rule starts from the current defaults so the user only changes what should differ for this app.
+        var rule = new AppRule { ProcessGlob = "newapp", Tone = DefaultTone, Level = DefaultCleanupLevel };
+        AppRules.Add(rule);
+        SelectedRule = rule;
+    }
 
     [RelayCommand]
     private void RemoveRule(AppRule? rule)
@@ -437,11 +443,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     [RelayCommand]
     private void ResetRules()
     {
+        // The default is no rules at all: every app follows the Style defaults.
         AppRules.Clear();
-        foreach (var r in DefaultAppRules.Seed())
-        {
-            AppRules.Add(r);
-        }
     }
 
     [RelayCommand]
