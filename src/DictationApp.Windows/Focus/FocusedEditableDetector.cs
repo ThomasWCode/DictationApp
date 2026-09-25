@@ -82,9 +82,12 @@ public sealed class FocusedEditableDetector : IDisposable
     }
 
     /// <summary>
-    /// The last few characters before the caret of the focused control: from the Text pattern (the caret or
-    /// selection start), else the end of the Value pattern's value (as when appending). "" at the start of a field;
-    /// null for password fields, controls with neither pattern, and when UI Automation does not answer in time.
+    /// The last few characters before the caret of the focused control, from the Text pattern (the caret or
+    /// selection start). The caller checks that the target window has focus: the control itself may belong to another
+    /// process (WebView2 content runs in msedgewebview2). "" at the start of a field,
+    /// or when a control without a caret position (Value pattern only, a Chromium contenteditable reporting no caret)
+    /// is empty. Null otherwise: password fields, text whose caret position is unknown, controls with neither pattern,
+    /// and when UI Automation does not answer in time.
     /// </summary>
     public string? ReadTextBeforeCaret() => RunWithBudget(() => ProbeTextBeforeCaret() is { } text ? new CaretText(text) : (CaretText?)null, CaretBudget)?.Text;
 
@@ -118,17 +121,16 @@ public sealed class FocusedEditableDetector : IDisposable
                 }
 
                 // No caret reported (an empty contenteditable in Chromium): an empty document is the start of the field.
-                var start = pattern.DocumentRange.GetText(CaretContextLength) ?? string.Empty;
-                if (start.Trim().Trim('\uFFFC', '\u200B', '\uFEFF').Length == 0)
+                if (IsBlank(pattern.DocumentRange.GetText(CaretContextLength)))
                 {
                     return string.Empty;
                 }
             }
 
-            if (focused.Patterns.Value.IsSupported)
+            // The Value pattern gives no caret position: only an empty field says what comes before the insertion.
+            if (focused.Patterns.Value.IsSupported && IsBlank(focused.Patterns.Value.Pattern.Value.ValueOrDefault))
             {
-                var value = focused.Patterns.Value.Pattern.Value.ValueOrDefault ?? string.Empty;
-                return value.Length > CaretContextLength ? value[^CaretContextLength..] : value;
+                return string.Empty;
             }
 
             return null;
@@ -194,6 +196,9 @@ public sealed class FocusedEditableDetector : IDisposable
             return null;
         }
     }
+
+    /// <summary>Empty apart from whitespace and invisible stand-ins such as a rich editor's empty paragraph.</summary>
+    private static bool IsBlank(string? text) => (text ?? string.Empty).Trim().Trim('\uFFFC', '\u200B', '\uFEFF').Length == 0;
 
     private readonly record struct CaretText(string Text);
 

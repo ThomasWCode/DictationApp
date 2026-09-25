@@ -257,6 +257,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         _foreground.TextBeforeCaret = "";
         await DictateAsync("Second message.");
         Assert.StartsWith("Second message.", _inserter.LastText);
+        Assert.Equal(_foreground.Context.WindowHandle, _foreground.CaretTarget?.WindowHandle);
 
         // Unreadable controls keep the old behaviour.
         _foreground.TextBeforeCaret = null;
@@ -800,7 +801,13 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         /// <summary>What the focused control reports before its caret; null means it does not say.</summary>
         public string? TextBeforeCaret { get; set; }
 
-        public string? ReadTextBeforeCaret() => TextBeforeCaret;
+        public ForegroundContext? CaretTarget { get; private set; }
+
+        public string? ReadTextBeforeCaret(ForegroundContext target)
+        {
+            CaretTarget = target;
+            return TextBeforeCaret;
+        }
     }
 
     private sealed class FakeInserter : ITextInserter
