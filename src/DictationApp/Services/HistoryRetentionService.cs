@@ -50,6 +50,10 @@ public sealed class HistoryRetentionService(IHistoryRepository history, ISetting
             var s = settings.Current;
             var now = time.GetUtcNow();
             var deleted = 0;
+
+            // Judged before this pass deletes anything: a History with no records at all (a lost or recreated
+            // database) skips the orphan sweep, but one emptied by retention now still gets its orphans swept.
+            var historyWasEmpty = (await history.GetStatsAsync(ct)).Count == 0;
             if (s.HistoryRetention.ToTimeSpan() is { } keep)
             {
                 var paths = await history.DeleteOlderThanAsync(now - keep, ct);
@@ -62,7 +66,7 @@ public sealed class HistoryRetentionService(IHistoryRepository history, ISetting
                 deleted += DeleteFiles(paths);
             }
 
-            deleted += await maintenance.SweepOrphansAsync(ct);
+            deleted += await maintenance.SweepOrphansAsync(ct, historyWasEmpty);
             if (deleted > 0)
             {
                 logger.LogInformation("Retention removed {Count} audio files", deleted);
