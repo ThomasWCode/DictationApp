@@ -4,6 +4,7 @@ using System.Windows.Input;
 using DictationApp.Core.Abstractions;
 using DictationApp.Core.Cleanup;
 using DictationApp.Core.Settings;
+using DictationApp.Windows.Hotkey;
 
 namespace DictationApp.Settings;
 
@@ -11,13 +12,15 @@ public partial class SettingsWindow : Window
 {
     private readonly SettingsViewModel _viewModel;
     private readonly Shell _shell;
+    private readonly HotkeyService _hotkeys;
     private readonly HashSet<int> _chordKeysDown = [];
     private readonly List<int> _chordRecorded = [];
 
-    public SettingsWindow(SettingsViewModel viewModel, Shell shell)
+    public SettingsWindow(SettingsViewModel viewModel, Shell shell, HotkeyService hotkeys)
     {
         _viewModel = viewModel;
         _shell = shell;
+        _hotkeys = hotkeys;
         DataContext = viewModel;
         InitializeComponent();
         ToneColumn.ItemsSource = Enum.GetValues<Tone>();
@@ -28,7 +31,12 @@ public partial class SettingsWindow : Window
         {
             viewModel.StopMicTest();
             viewModel.Detach();
+            _hotkeys.ObserveOnly = false;
         };
+
+        // Recording a chord that includes the current one must not start a dictation meanwhile.
+        ChordBox.GotKeyboardFocus += (_, _) => _hotkeys.ObserveOnly = true;
+        ChordBox.LostKeyboardFocus += (_, _) => _hotkeys.ObserveOnly = false;
     }
 
     private void ApiKeyBox_OnPasswordChanged(object sender, RoutedEventArgs e) => _viewModel.ApiKey = ApiKeyBox.Password;
