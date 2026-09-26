@@ -297,7 +297,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 parts.Add(tokenResp.IsSuccessStatusCode ? "AssemblyAI: OK." : $"AssemblyAI: rejected (HTTP {(int)tokenResp.StatusCode}).");
             }
 
-            // 2. Groq: a two-token completion with the configured model proves key and model together.
+            // 2. Groq: a tiny completion with every model of the chain proves the key and each model together, so a
+            // fallback that would fail (retired, not allowed for the key) is found now rather than mid-dictation.
             if (groqKey.Length == 0)
             {
                 parts.Add("Groq: no key (cleanup levels fall back to raw text).");
@@ -305,28 +306,42 @@ public sealed partial class SettingsViewModel : ObservableObject
             else
             {
                 var baseUrl = string.IsNullOrWhiteSpace(LlmBaseUrl) ? AppSettings.DefaultLlmBaseUrl : LlmBaseUrl.Trim().TrimEnd('/') + "/";
-                var model = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
-                using var llmReq = new HttpRequestMessage(HttpMethod.Post, baseUrl + "chat/completions");
-                llmReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", groqKey);
-                var effort = Core.Cleanup.LlmPostProcessor.ReasoningEffortFor(model) is { } e ? ",\"reasoning_effort\":\"" + e + "\"" : string.Empty;
-                llmReq.Content = new StringContent("{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"max_tokens\":8" + effort + "}", System.Text.Encoding.UTF8, "application/json");
-                using var llmResp = await client.SendAsync(llmReq);
-                if (llmResp.IsSuccessStatusCode)
+                var primary = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
+                var chain = new[] { primary }
+                    .Concat(LlmFallbackModels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var results = new List<string>();
+                foreach (var model in chain)
                 {
-                    parts.Add($"Groq: OK ({model}).");
-                }
-                else
-                {
+                    using var llmReq = new HttpRequestMessage(HttpMethod.Post, baseUrl + "chat/completions");
+                    llmReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", groqKey);
+                    var effort = Core.Cleanup.LlmPostProcessor.ReasoningEffortFor(model) is { } e ? ",\"reasoning_effort\":\"" + e + "\"" : string.Empty;
+                    llmReq.Content = new StringContent("{\"model\":" + System.Text.Json.JsonSerializer.Serialize(model) + ",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"max_tokens\":8" + effort + "}", System.Text.Encoding.UTF8, "application/json");
+                    using var llmResp = await client.SendAsync(llmReq);
+                    if (llmResp.IsSuccessStatusCode)
+                    {
+                        results.Add($"{model} OK");
+                        continue;
+                    }
+
                     var body = await llmResp.Content.ReadAsStringAsync();
                     var reason = (int)llmResp.StatusCode switch
                     {
                         401 => "key rejected",
-                        404 => "model not found; pick one from the free tier",
-                        429 => "rate limited right now (free tier); it will work again shortly",
-                        _ => $"HTTP {(int)llmResp.StatusCode}",
+                        403 => "this key may not use the model (allow it in the Groq console, or pick another)",
+                        404 => "model not found or retired; pick one from the free tier",
+                        429 => "rate limited (the free tier caps requests and tokens per minute and per day); try again later",
+                        _ => $"HTTP {(int)llmResp.StatusCode} {Truncate(body, 100)}",
                     };
-                    parts.Add($"Groq: {reason}. {Truncate(body, 120)}");
+                    results.Add($"{model}: {reason}");
+                    if (llmResp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                    {
+                        break; // the key itself is rejected: every other model would say the same
+                    }
                 }
+
+                parts.Add("Groq: " + string.Join("; ", results) + ".");
             }
 
             TestKeyStatus = string.Join(" ", parts);
