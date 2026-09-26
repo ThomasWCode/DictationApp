@@ -20,6 +20,40 @@ public class TranscriptAssemblerTests
     }
 
     [Fact]
+    public void Pause_marked_text_leaves_each_pause_for_the_llm_to_decide()
+    {
+        var a = new TranscriptAssembler();
+        a.Ingest(Turn(0, "Dictating into the chat box.", true, true));
+        a.Ingest(Turn(1, "Still adds a space.", true, true));
+
+        Assert.Equal("Dictating into the chat box. Still adds a space.", a.FinalText);
+        Assert.Equal("Dictating into the chat box [pause] still adds a space.", a.PauseMarkedText);
+    }
+
+    [Theory]
+    [InlineData("Is it ready?|Yes.", "Is it ready? [pause] yes.")] // questions keep their mark
+    [InlineData("I think.|I know.", "I think [pause] I know.")] // "I" stays capital
+    [InlineData("Um.|WhatsApp is odd.", "Um [pause] WhatsApp is odd.")] // mixed-case names stay
+    [InlineData("The SDK.|NASA said so.", "The SDK [pause] NASA said so.")] // acronyms stay
+    [InlineData("Wait...|No.", "Wait... [pause] no.")] // an ellipsis is kept
+    [InlineData("One turn only.", "One turn only.")]
+    [InlineData("First.||Second.", "First [pause] second.")] // empty turns are skipped
+    public void Join_at_pauses(string turns, string expected)
+    {
+        Assert.Equal(expected, TranscriptAssembler.JoinAtPauses(turns.Split('|')));
+    }
+
+    [Theory]
+    [InlineData("Hello [pause] there.", "Hello there.")]
+    [InlineData("The end [pause].", "The end.")]
+    [InlineData("One.\n[pause] Two.", "One.\nTwo.")]
+    [InlineData("No markers here.", "No markers here.")]
+    public void Pause_markers_left_by_the_model_are_removed(string output, string expected)
+    {
+        Assert.Equal(expected, TranscriptAssembler.RemovePauseMarkers(output));
+    }
+
+    [Fact]
     public void Formatted_final_turn_wins_over_unformatted_duplicate()
     {
         var a = new TranscriptAssembler();

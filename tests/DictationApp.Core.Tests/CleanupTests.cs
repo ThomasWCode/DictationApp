@@ -129,6 +129,17 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void Prompt_explains_pause_markers_when_the_transcript_has_them()
+    {
+        var marked = PromptBuilder.BuildSystemPrompt(Ctx() with { PauseMarkers = true });
+
+        Assert.Contains("\"[pause]\" marks where the speaker stopped", marked);
+        Assert.Contains("Never output [pause]", marked);
+        Assert.DoesNotContain("\"[pause]\" marks", PromptBuilder.BuildSystemPrompt(Ctx()));
+        Assert.DoesNotContain("\"[pause]\" marks", PromptBuilder.BuildSystemPrompt(Ctx(CleanupLevel.None, Tone.Formal) with { PauseMarkers = true }));
+    }
+
+    [Fact]
     public void No_keyterms_says_none()
     {
         Assert.Contains("(none)", PromptBuilder.BuildSystemPrompt(Ctx()));

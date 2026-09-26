@@ -8,7 +8,8 @@ public sealed record PromptContext(
     IReadOnlyList<string> Keyterms,
     string AppName,
     string? Url,
-    string? AppHint);
+    string? AppHint,
+    bool PauseMarkers = false);
 
 /// <summary>Pure. Builds the system prompt for the LLM Gateway cleanup call.</summary>
 public static class PromptBuilder
@@ -31,9 +32,21 @@ public static class PromptBuilder
         if (ctx.Level != CleanupLevel.None)
         {
             // Not at None, which keeps the transcript's wording and punctuation even when a tone runs the LLM.
-            sb.AppendLine("   The transcript is punctuated in pieces cut where the speaker paused, so a full stop and capital");
-            sb.AppendLine("   letter can fall inside a sentence (\"Typing into the search box. Still adds a space.\" -> \"Typing");
-            sb.AppendLine("   into the search box still adds a space.\"): join such fragments into the sentence they belong to.");
+            if (ctx.PauseMarkers)
+            {
+                sb.AppendLine("   \"[pause]\" marks where the speaker stopped for a second or more, often to think in mid-sentence.");
+                sb.AppendLine("   The punctuation and capital letter the transcriber put at each pause have been removed: decide");
+                sb.AppendLine("   afresh. When the words after [pause] continue the sentence, join them into it (\"typing into the");
+                sb.AppendLine("   search box [pause] still adds a space\" -> \"Typing into the search box still adds a space.\"); when a");
+                sb.AppendLine("   new sentence starts, end the previous one and capitalise (\"I sent the report [pause] then I called");
+                sb.AppendLine("   sam\" -> \"I sent the report. Then I called Sam.\"). Restore capitals on names. Never output [pause].");
+            }
+            else
+            {
+                sb.AppendLine("   The transcript is punctuated in pieces cut where the speaker paused, so a full stop and capital");
+                sb.AppendLine("   letter can fall inside a sentence (\"Typing into the search box. Still adds a space.\" -> \"Typing");
+                sb.AppendLine("   into the search box still adds a space.\"): join such fragments into the sentence they belong to.");
+            }
         }
         sb.Append("4. Preserve the exact spelling and capitalisation of these terms if present: ");
         sb.AppendLine(ctx.Keyterms.Count == 0 ? "(none)" : string.Join(", ", ctx.Keyterms));
@@ -62,9 +75,9 @@ public static class PromptBuilder
     public static string LevelInstruction(CleanupLevel level) => level switch
     {
         CleanupLevel.None => "Do not change wording; apply only the tone rules and formatting commands.",
-        CleanupLevel.Light => "Remove fillers (um, uh, like, you know), false starts, stutters, and immediate self-corrections (\"Monday, no, Tuesday\" -> \"Tuesday\"). Fix punctuation and capitalisation, including removing full stops placed where the speaker only paused mid-sentence. Do not rephrase or reorder.",
-        CleanupLevel.Medium => "Remove fillers, false starts, stutters and immediate self-corrections; fix punctuation and capitalisation; fix grammar and agreement errors; remove redundant repetition; split run-on sentences. Keep the user's words and order where possible.",
-        CleanupLevel.High => "Remove fillers, false starts and self-corrections; fix punctuation, capitalisation and grammar; remove redundancy; tighten wording; merge fragments; add paragraph breaks at topic shifts. Keep every fact, name, number and instruction. Do not shorten by more than 30%.",
+        CleanupLevel.Light => "Remove fillers (um, uh, like, you know), false starts, stutters, and immediate self-corrections (\"Monday, no, Tuesday\" -> \"Tuesday\"). Fix punctuation and capitalisation, and join sentences the transcriber broke where the speaker paused. Do not rephrase or reorder.",
+        CleanupLevel.Medium => "Remove fillers, false starts, stutters and immediate self-corrections; fix punctuation and capitalisation, joining sentences broken where the speaker paused; fix grammar and agreement errors; remove redundant repetition; break up only genuinely run-on sentences. Keep the user's words and order where possible.",
+        CleanupLevel.High => "Remove fillers, false starts and self-corrections; fix punctuation, capitalisation and grammar; remove redundancy; tighten wording; merge fragments, including sentences broken where the speaker paused; add paragraph breaks at topic shifts. Keep every fact, name, number and instruction. Do not shorten by more than 30%.",
         _ => throw new ArgumentOutOfRangeException(nameof(level)),
     };
 
@@ -82,7 +95,7 @@ public static class PromptBuilder
             "Input: ok so um send the report by friday new line thanks\n" +
             "Output: ok so um send the report by friday\nthanks",
         CleanupLevel.Light =>
-            "Input: um so I think we should, we should ship on monday no tuesday. Because the build. Is not ready period what do you think question mark\n" +
+            "Input: um so I think we should, we should ship on monday no tuesday [pause] because the build [pause] is not ready period what do you think question mark\n" +
             "Output: So I think we should ship on Tuesday because the build is not ready. What do you think?",
         CleanupLevel.Medium =>
             "Input: uh the results they was pretty clear the results show that the the drug works and it works well and we should we should publish\n" +

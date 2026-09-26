@@ -78,6 +78,30 @@ public class LlmPostProcessorTests
     }
 
     [Fact]
+    public async Task The_model_sees_the_pauses_and_no_marker_reaches_the_text()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Typing into the box [pause] still adds a space.")));
+        var request = Request with { PauseMarkedTranscript = "Typing into the box [pause] still adds a space." };
+
+        var result = await p.ProcessAsync("Typing into the box. Still adds a space.", request, CancellationToken.None);
+
+        Assert.Contains("Typing into the box [pause] still adds a space.", handler.Calls[0].Body);
+        Assert.Contains("marks where the speaker stopped", handler.Calls[0].Body);
+        Assert.Equal("Typing into the box still adds a space.", result.Text);
+    }
+
+    [Fact]
+    public async Task Level_none_keeps_the_transcript_punctuation()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Typing into the box. Still adds a space.")));
+        var request = Request with { Level = CleanupLevel.None, Tone = Tone.Formal, PauseMarkedTranscript = "Typing into the box [pause] still adds a space." };
+
+        await p.ProcessAsync("Typing into the box. Still adds a space.", request, CancellationToken.None);
+
+        Assert.DoesNotContain("[pause]", handler.Calls[0].Body);
+    }
+
+    [Fact]
     public async Task Reasoning_models_are_asked_for_low_effort()
     {
         var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Clean text here now.")), model: "openai/gpt-oss-120b");
