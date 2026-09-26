@@ -183,7 +183,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     {
         foreach (var term in latest.Dictionary)
         {
-            if (Dictionary.Any(t => string.Equals(t.Term.Trim(), term.Term.Trim(), StringComparison.OrdinalIgnoreCase)) || _edits.RemovedHere(term.Term, Dictionary))
+            if (Dictionary.Any(t => string.Equals(t.Term.Trim(), term.Term.Trim(), StringComparison.OrdinalIgnoreCase)) || _edits.Knows(term.Term))
             {
                 continue;
             }

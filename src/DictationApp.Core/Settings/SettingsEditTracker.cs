@@ -52,12 +52,12 @@ public sealed class SettingsEditTracker
         Level = level;
     }
 
-    /// <summary>True when the user removed <paramref name="term"/> in this window (so a refresh must not bring it back).</summary>
-    public bool RemovedHere(string term, IEnumerable<DictionaryTerm> shownTerms)
-    {
-        var shown = new HashSet<DictionaryTerm>(shownTerms, ReferenceEqualityComparer.Instance);
-        return _terms.Any(kv => !shown.Contains(kv.Key) && SameTerm(kv.Value.Term, term));
-    }
+    /// <summary>
+    /// True when this window loaded (or has since shown) a term named <paramref name="term"/>, whether it is still shown,
+    /// renamed or removed here. A refresh must not show the stored copy of such a term as a new row: that would undo a
+    /// rename or removal made here, and deleting the duplicate would then lose the renamed term too.
+    /// </summary>
+    public bool Knows(string term) => _terms.Values.Any(v => SameTerm(v.Term, term));
 
     public SettingsEdits Diff(Tone tone, CleanupLevel level, string hotkey, IReadOnlyCollection<DictionaryTerm> shownTerms, IReadOnlyCollection<AppRule> shownRules)
     {
