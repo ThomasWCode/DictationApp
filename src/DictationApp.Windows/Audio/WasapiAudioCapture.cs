@@ -11,6 +11,9 @@ namespace DictationApp.Windows.Audio;
 /// converted to 16 kHz mono PCM16 100 ms frames by <see cref="Pcm16Pipeline"/>. Uses the client
 /// <see cref="WarmMicrophone"/> keeps initialised when one is ready (audio within ~15-100 ms of the key press),
 /// otherwise opens the device from scratch (0.4-1 s on DSP microphones).
+/// <see cref="Stop"/> delivers the last, partial frame (zero-padded) before it returns: the pipeline only emits whole
+/// 100 ms frames, so without the flush up to 100 ms at the end of every dictation was lost from both the stream and
+/// the saved recording.
 /// </summary>
 public sealed class WasapiAudioCapture : IAudioCapture
 {
@@ -19,6 +22,7 @@ public sealed class WasapiAudioCapture : IAudioCapture
     private readonly string? _deviceId;
     private readonly ILogger _logger;
     private readonly WarmMicrophone? _warm;
+    private readonly object _pushLock = new(); // cold path: no NAudio callback may push while the tail is flushed
     private WasapiCapture? _capture;
     private Pcm16Pipeline? _pipeline;
     private MMDevice? _device;
@@ -112,7 +116,11 @@ public sealed class WasapiAudioCapture : IAudioCapture
             return;
         }
 
-        IsRunning = false;
+        lock (_pushLock)
+        {
+            IsRunning = false;
+        }
+
         try
         {
             _capture?.StopRecording();
@@ -120,6 +128,11 @@ public sealed class WasapiAudioCapture : IAudioCapture
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "StopRecording threw");
+        }
+
+        lock (_pushLock)
+        {
+            FlushTail();
         }
 
         // Nothing was ready for this dictation (preparation failed, say while another app held the device), so try
@@ -156,6 +169,9 @@ public sealed class WasapiAudioCapture : IAudioCapture
             while (true)
             {
                 prepared.BufferReady.WaitOne(100);
+
+                // Read before draining, so the drain that follows a stop request collects everything captured up to it.
+                var stopping = _stopWarm;
                 var offset = 0;
                 var packet = prepared.CaptureClient.GetNextPacketSize();
                 while (packet != 0)
@@ -187,9 +203,7 @@ public sealed class WasapiAudioCapture : IAudioCapture
                 }
 
                 Emit(buffer, offset);
-
-                // Checked after draining, so the last packets before the stop are still delivered.
-                if (_stopWarm)
+                if (stopping)
                 {
                     return;
                 }
@@ -235,6 +249,11 @@ public sealed class WasapiAudioCapture : IAudioCapture
         }
 
         var healthy = _warmHealthy && _warmThread is not { IsAlive: true };
+        if (_warmThread is not { IsAlive: true })
+        {
+            FlushTail(); // the loop has drained and exited, so nothing else pushes into the pipeline now
+        }
+
         try
         {
             // Stopped and reset, but still initialised: the next dictation starts instantly.
@@ -254,19 +273,45 @@ public sealed class WasapiAudioCapture : IAudioCapture
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        if (!IsRunning || _pipeline is null)
+        lock (_pushLock)
+        {
+            if (!IsRunning || _pipeline is null)
+            {
+                return;
+            }
+
+            try
+            {
+                _pipeline.Push(e.Buffer, 0, e.BytesRecorded, frame => FrameCaptured?.Invoke(frame));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Audio pipeline error");
+                Faulted?.Invoke(ex);
+            }
+        }
+    }
+
+    /// <summary>Emits what is left in the pipeline as a last, zero-padded frame. Logs only: the dictation is ending.</summary>
+    private void FlushTail()
+    {
+        if (_pipeline is not { } pipeline)
         {
             return;
         }
 
         try
         {
-            _pipeline.Push(e.Buffer, 0, e.BytesRecorded, frame => FrameCaptured?.Invoke(frame));
+            var before = pipeline.Position;
+            pipeline.Flush(frame => FrameCaptured?.Invoke(frame));
+            if (pipeline.Position > before)
+            {
+                _logger.LogDebug("Delivered the final partial audio frame at {Position:0.00}s", pipeline.Position.TotalSeconds);
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Audio pipeline error");
-            Faulted?.Invoke(ex);
+            _logger.LogDebug(ex, "Could not flush the final audio frame");
         }
     }
 

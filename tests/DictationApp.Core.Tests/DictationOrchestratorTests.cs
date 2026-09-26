@@ -142,8 +142,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         await StartAsync();
         _hotkey.PressChord();
         await WaitForState(DictationState.Arming);
-        _clock.Advance(TimeSpan.FromMilliseconds(100));
-        _hotkey.ReleaseChord();
+        _hotkey.ReleaseChord(ChordRelease.Tap);
         await WaitForIdleSession();
 
         Assert.True(_transcriber.Aborted);
@@ -152,6 +151,222 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         Assert.Empty(_history.Records);
         Assert.Null(_inserter.LastText);
         Assert.False(_capture.IsRunning);
+    }
+
+    [Fact]
+    public async Task Tap_is_cancelled_even_when_the_session_began_first()
+    {
+        // The tap verdict comes from the key times, so a fast connection cannot turn it into a dictation.
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Accidental.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        await WaitForIdleSession();
+
+        Assert.True(_transcriber.Aborted);
+        Assert.Null(_inserter.LastText);
+        Assert.Empty(_history.Records);
+        Assert.True(_sinks.Last!.Discarded);
+        Assert.Null(_hub.Current.Badge);
+    }
+
+    [Fact]
+    public async Task Slow_window_lookup_does_not_turn_a_hold_into_a_tap_or_a_tap_into_a_hold()
+    {
+        // The release is classified by the hotkey service when the key goes up; how long the start-up work (window
+        // lookup, microphone) takes no longer matters.
+        using var lookup = new ManualResetEventSlim();
+        _foreground.OnCapture = () => lookup.Wait(TimeSpan.FromSeconds(5));
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _hotkey.ReleaseChord(ChordRelease.Hold);
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        lookup.Set();
+        await WaitFor(() => _orchestrator.State == DictationState.Finalising, "hold finalising");
+        _transcriber.CompleteConnect();
+        await WaitForIdleSession();
+
+        Assert.True(_transcriber.ShutdownCalled);
+        Assert.False(_transcriber.Aborted);
+    }
+
+    [Fact]
+    public async Task A_new_press_while_a_tap_is_being_cancelled_starts_a_dictation_instead_of_flashing_busy()
+    {
+        using var lookup = new ManualResetEventSlim();
+        var lookups = 0;
+        _foreground.OnCapture = () =>
+        {
+            if (Interlocked.Increment(ref lookups) == 1)
+            {
+                lookup.Wait(TimeSpan.FromSeconds(5)); // the tap's session is stuck in a slow window lookup
+            }
+        };
+        var flashes = 0;
+        _hub.Flashed += () => flashes++;
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        await Task.Delay(50);
+        _hotkey.PressChord();                     // a new press after the double-tap window
+        await Task.Delay(50);
+        lookup.Set();
+
+        await WaitFor(() => Volatile.Read(ref lookups) == 2, "second dictation started");
+        Assert.Equal(0, flashes);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Second.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+        Assert.Equal("Second. [cleaned]", _inserter.LastText);
+    }
+
+    [Fact]
+    public async Task Release_before_begin_stops_the_microphone_at_once()
+    {
+        // Nothing said after the release is recorded or uploaded, even while the connection is still being set up.
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _capture.Emit(1);
+        _hotkey.ReleaseChord();
+        await WaitFor(() => !_capture.IsRunning, "microphone stopped at the release");
+        Assert.False(_transcriber.IsConnected);
+        _capture.Emit(2);                         // a real microphone delivers nothing after Stop
+        _transcriber.RaiseTurnsOnConnect("Pre-release words.");
+        _transcriber.CompleteConnect();
+        await WaitForIdleSession();
+
+        Assert.Equal(1, _transcriber.FramesReceived);
+        Assert.Equal(AudioFrame.BytesPerFrame, _sinks.Last!.BytesWritten);
+        Assert.Equal("Pre-release words. [cleaned]", _inserter.LastText);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_last_partial_frame_delivered_by_stop_reaches_the_stream_and_the_recording(bool releaseBeforeBegin)
+    {
+        _capture.FrameOnStop = 9;
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _capture.Emit(1);
+        if (!releaseBeforeBegin)
+        {
+            _transcriber.CompleteConnect();
+            await WaitForState(DictationState.Recording);
+        }
+
+        _transcriber.RaiseTurnsOnConnect("Last word.");
+        _hotkey.ReleaseChord();
+        if (releaseBeforeBegin)
+        {
+            await WaitFor(() => !_capture.IsRunning, "stopped");
+            _transcriber.CompleteConnect();
+        }
+        else
+        {
+            _transcriber.RaiseTurn(0, "Last word.", endOfTurn: true, formatted: true);
+        }
+
+        await WaitForIdleSession();
+        Assert.Equal(2, _transcriber.FramesReceived);
+        Assert.Equal(2 * AudioFrame.BytesPerFrame, _sinks.Last!.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Escape_then_release_during_a_slow_start_discards()
+    {
+        // Both arrive before the session looks: the discard wins over the release.
+        using var lookup = new ManualResetEventSlim();
+        _foreground.OnCapture = () => lookup.Wait(TimeSpan.FromSeconds(5));
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _hotkey.Escape();
+        _hotkey.ReleaseChord();
+        await Task.Delay(50);
+        lookup.Set();
+        await WaitForIdleSession();
+
+        Assert.True(_transcriber.Aborted);
+        Assert.Empty(_history.Records);
+        Assert.Null(_inserter.LastText);
+        Assert.Equal("Discarded", _hub.Current.Badge);
+    }
+
+    [Fact]
+    public async Task Escape_after_the_release_is_ignored_and_the_dictation_finishes()
+    {
+        _post.Gate = new TaskCompletionSource();
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Keep me.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord();
+        await WaitForState(DictationState.PostProcessing);
+        _hotkey.Escape();
+        await Task.Delay(50);
+        _post.Gate.SetResult();
+        await WaitForIdleSession();
+
+        Assert.Equal("Keep me. [cleaned]", _inserter.LastText);
+        Assert.Equal(RecordStatus.Inserted, Assert.Single(_history.Records).Status);
+    }
+
+    [Fact]
+    public async Task Escape_after_the_time_cap_is_ignored_and_the_dictation_finishes()
+    {
+        await _settings.UpdateAsync(s => s.MaxDictationMinutes = 1);
+        _post.Gate = new TaskCompletionSource();
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "A long one.", endOfTurn: true, formatted: true);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await WaitForState(DictationState.PostProcessing);
+        _hotkey.Escape();
+        await Task.Delay(50);
+        _post.Gate.SetResult();
+        await WaitForIdleSession();
+
+        Assert.Equal("A long one. [cleaned]", _inserter.LastText);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Dictation limit");
+    }
+
+    [Fact]
+    public async Task Closing_the_app_mid_dictation_keeps_it_for_retry()
+    {
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _capture.Emit(1);
+        _transcriber.RaiseTurn(0, "half a thought", endOfTurn: false);
+        await WaitFor(() => _hub.Current.LiveText == "half a thought", "live text");
+
+        await _orchestrator.StopAsync(CancellationToken.None);
+
+        var record = Assert.Single(_history.Records);
+        Assert.Equal(RecordStatus.Failed, record.Status);
+        Assert.Equal(DictationOrchestrator.InterruptedReason, record.FailureReason);
+        Assert.Equal("half a thought", record.RawTranscript);
+        Assert.NotNull(record.AudioPath);
+        Assert.True(_sinks.Last!.Completed);
+        Assert.Null(_inserter.LastText);
+        Assert.DoesNotContain(_notifier.Toasts, t => t.Title == "Dictation limit");
     }
 
     [Fact]
@@ -582,7 +797,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public event Action? ChordDown;
 
-        public event Action? ChordUp;
+        public event Action<ChordRelease>? ChordUp;
 
         public event Action? EscapePressed;
 
@@ -602,10 +817,10 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             ChordDown?.Invoke();
         }
 
-        public void ReleaseChord()
+        public void ReleaseChord(ChordRelease release = ChordRelease.Hold)
         {
             IsChordHeld = false;
-            ChordUp?.Invoke();
+            ChordUp?.Invoke(release);
         }
 
         public void Escape() => EscapePressed?.Invoke();
@@ -625,6 +840,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public bool CompleteOnStart { get; set; }
 
+        /// <summary>When set, Stop delivers one last frame of this fill first, like the microphone's partial tail.</summary>
+        public byte? FrameOnStop { get; set; }
+
         public void Start()
         {
             IsRunning = true;
@@ -638,12 +856,26 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             }
         }
 
-        public void Stop() => IsRunning = false;
+        public void Stop()
+        {
+            if (IsRunning && FrameOnStop is { } fill)
+            {
+                Emit(fill);
+            }
+
+            IsRunning = false;
+        }
 
         public void Dispose() => Stop();
 
+        /// <summary>A frame from the microphone; like a real one, nothing arrives once it is stopped.</summary>
         public void Emit(byte fill)
         {
+            if (!IsRunning)
+            {
+                return;
+            }
+
             var bytes = new byte[AudioFrame.BytesPerFrame];
             Array.Fill(bytes, fill);
             FrameCaptured?.Invoke(new AudioFrame(bytes, 0.5f, TimeSpan.Zero));
@@ -708,6 +940,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         public Action? OnConnected { get; set; }
 
         public void CompleteConnect() => _connect.TrySetResult(new BeginMessage { Id = "s1" });
+
+        /// <summary>The transcript the server returns for audio that was buffered before Begin.</summary>
+        public void RaiseTurnsOnConnect(string text) => OnConnected = () => RaiseTurn(0, text, endOfTurn: true, formatted: true);
 
         public void FailConnect(Exception ex) => _connect.TrySetException(ex);
 
@@ -848,14 +1083,22 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public bool Fail { get; set; }
 
+        /// <summary>When set, cleanup waits for it, holding the session in PostProcessing.</summary>
+        public TaskCompletionSource? Gate { get; set; }
+
         public PostProcessRequest? LastRequest { get; private set; }
 
-        public Task<PostProcessResult> ProcessAsync(string rawTranscript, PostProcessRequest request, CancellationToken ct)
+        public async Task<PostProcessResult> ProcessAsync(string rawTranscript, PostProcessRequest request, CancellationToken ct)
         {
             LastRequest = request;
-            return Task.FromResult(Fail
+            if (Gate is { } gate)
+            {
+                await gate.Task.WaitAsync(ct);
+            }
+
+            return Fail
                 ? new PostProcessResult(rawTranscript, false, null, "gateway-down")
-                : new PostProcessResult(rawTranscript + " [cleaned]", true, "fake-model", null, 50, 10));
+                : new PostProcessResult(rawTranscript + " [cleaned]", true, "fake-model", null, 50, 10);
         }
     }
 
