@@ -77,9 +77,12 @@ public sealed class WasapiAudioCapture : IAudioCapture
         try
         {
             using var enumerator = new MMDeviceEnumerator();
-            _device = string.IsNullOrEmpty(_deviceId)
-                ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications)
-                : enumerator.GetDevice(_deviceId);
+            _device = MicrophoneDevice.Open(enumerator, _deviceId, out var fallback);
+            if (fallback)
+            {
+                _logger.LogInformation("The chosen microphone is not connected; recording from the default one ({Device})", _device.FriendlyName);
+            }
+
             _capture = new WasapiCapture(_device, useEventSync: true, audioBufferMillisecondsLength: 20);
             _pipeline = new Pcm16Pipeline(_capture.WaveFormat);
             _capture.DataAvailable += OnDataAvailable;

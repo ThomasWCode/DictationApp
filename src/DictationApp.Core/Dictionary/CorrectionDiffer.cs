@@ -8,13 +8,31 @@ public sealed record Correction(string From, string To);
 /// <summary>
 /// Pure. Word-level longest-common-subsequence diff between the text we inserted and the text after the user
 /// edited it. Replaced runs become candidate dictionary terms for the "Correct last dictation" dialog.
+/// The words both texts start and end with are set aside first, so only the stretch between the first and the last
+/// change is compared; that stretch is refused beyond <see cref="MaxCells"/> (<see cref="IsTooLong"/>) instead of
+/// allocating a table of hundreds of megabytes for a long dictation.
 /// </summary>
 public static partial class CorrectionDiffer
 {
+    /// <summary>The most word pairs compared at once: 4,000 × 4,000, about 64 MB and well under a second.</summary>
+    public const long MaxCells = 16_000_000;
+
+    /// <summary>True when the changes span too many words to compare in one go (see <see cref="MaxCells"/>).</summary>
+    public static bool IsTooLong(string inserted, string edited)
+    {
+        var (a, b) = ChangedStretch(Tokenise(inserted), Tokenise(edited));
+        return (long)(a.Length + 1) * (b.Length + 1) > MaxCells;
+    }
+
+    /// <summary>The corrections, or none when <see cref="IsTooLong"/>.</summary>
     public static IReadOnlyList<Correction> Diff(string inserted, string edited)
     {
-        var a = Tokenise(inserted);
-        var b = Tokenise(edited);
+        var (a, b) = ChangedStretch(Tokenise(inserted), Tokenise(edited));
+        if ((long)(a.Length + 1) * (b.Length + 1) > MaxCells)
+        {
+            return [];
+        }
+
         var lcs = new int[a.Length + 1, b.Length + 1];
         for (var i = a.Length - 1; i >= 0; i--)
         {
@@ -95,6 +113,25 @@ public static partial class CorrectionDiffer
     private static string[] Tokenise(string s) => string.IsNullOrWhiteSpace(s)
         ? []
         : Whitespace().Split(s.Trim());
+
+    /// <summary>The words between the common start and the common end of both texts.</summary>
+    private static (string[] A, string[] B) ChangedStretch(string[] a, string[] b)
+    {
+        var start = 0;
+        while (start < a.Length && start < b.Length && string.Equals(a[start], b[start], StringComparison.Ordinal))
+        {
+            start++;
+        }
+
+        int endA = a.Length, endB = b.Length;
+        while (endA > start && endB > start && string.Equals(a[endA - 1], b[endB - 1], StringComparison.Ordinal))
+        {
+            endA--;
+            endB--;
+        }
+
+        return (a[start..endA], b[start..endB]);
+    }
 
     [GeneratedRegex(@"\s+")]
     private static partial Regex Whitespace();

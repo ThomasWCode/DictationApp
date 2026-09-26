@@ -156,6 +156,39 @@ public class KeytermsSelectorTests
 public class CorrectionDifferTests
 {
     [Fact]
+    public void A_long_text_with_one_fix_is_compared_quickly()
+    {
+        // The unchanged words before and after the fix are set aside, so a 10,000-word dictation costs nothing extra.
+        var words = Enumerable.Range(0, 10_000).Select(i => "word" + i).ToArray();
+        var inserted = string.Join(' ', words.Take(5_000)) + " ice on ice id " + string.Join(' ', words.Skip(5_000));
+        var edited = string.Join(' ', words.Take(5_000)) + " isoniazid " + string.Join(' ', words.Skip(5_000));
+
+        Assert.False(CorrectionDiffer.IsTooLong(inserted, edited));
+        var diff = Assert.Single(CorrectionDiffer.Diff(inserted, edited));
+        Assert.Equal("isoniazid", diff.To);
+    }
+
+    [Fact]
+    public void Changes_spread_over_too_many_words_are_refused_not_allocated()
+    {
+        var words = Enumerable.Range(0, 5_000).Select(i => "word" + i).ToArray();
+        var inserted = "alpha " + string.Join(' ', words) + " omega";
+        var edited = "ALPHA " + string.Join(' ', words) + " OMEGA";
+
+        Assert.True(CorrectionDiffer.IsTooLong(inserted, edited));
+        Assert.Empty(CorrectionDiffer.Diff(inserted, edited));
+    }
+
+    [Fact]
+    public void A_fix_next_to_a_repeated_word_is_found()
+    {
+        // With the shared ending set aside first, "their" is compared with "there" rather than lost to the repeat.
+        var diff = Assert.Single(CorrectionDiffer.Diff("their there", "there there"));
+        Assert.Equal("their", diff.From);
+        Assert.Equal("there", diff.To);
+    }
+
+    [Fact]
     public void Finds_replaced_words()
     {
         var diff = CorrectionDiffer.Diff("please start the ice on ice id today", "please start the isoniazid today");

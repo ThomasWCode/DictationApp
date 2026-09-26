@@ -129,13 +129,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     private void Load(AppSettings s)
     {
         FlowBarMode = s.FlowBarMode;
-        HasGitHubToken = s.HasGitHubToken;
+        HasGitHubToken = Decrypts(s.GitHubTokenProtected);
         Autostart = RunKeyAutostart.IsEnabled() || s.Autostart;
         CheckForUpdates = s.CheckForUpdates;
         MaxDictationMinutes = s.MaxDictationMinutes;
         LanguageCodes = s.LanguageCodes ?? string.Empty;
-        HasStoredKey = s.HasApiKey;
-        HasGroqKey = s.HasGroqKey;
+        HasStoredKey = Decrypts(s.ApiKeyProtected);
+        HasGroqKey = Decrypts(s.GroqApiKeyProtected);
         SpeechModel = s.SpeechModel;
         LlmBaseUrl = s.LlmBaseUrl;
         LlmModel = s.LlmModel;
@@ -164,6 +164,12 @@ public sealed partial class SettingsViewModel : ObservableObject
 
         _edits.Reset(s, Dictionary, AppRules);
     }
+
+    /// <summary>
+    /// A stored key counts only when it can be decrypted: one protected for another Windows user or PC (a copied data
+    /// folder) is shown as missing, so it is entered again instead of failing at every dictation.
+    /// </summary>
+    private bool Decrypts(string? protectedValue) => !string.IsNullOrEmpty(protectedValue) && _secrets.Unprotect(protectedValue) is not null;
 
     /// <summary>Stops following changes made elsewhere; called when the window closes.</summary>
     public void Detach() => _store.Changed -= OnStoreChanged;
@@ -268,9 +274,9 @@ public sealed partial class SettingsViewModel : ObservableObject
             ApiKey = string.Empty;
             GroqApiKey = string.Empty;
             GitHubToken = string.Empty;
-            HasStoredKey = _store.Current.HasApiKey;
-            HasGroqKey = _store.Current.HasGroqKey;
-            HasGitHubToken = _store.Current.HasGitHubToken;
+            HasStoredKey = Decrypts(_store.Current.ApiKeyProtected);
+            HasGroqKey = Decrypts(_store.Current.GroqApiKeyProtected);
+            HasGitHubToken = Decrypts(_store.Current.GitHubTokenProtected);
             RequestClose?.Invoke();
         }
         catch (Exception ex)

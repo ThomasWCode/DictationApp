@@ -167,7 +167,23 @@ public sealed class JsonSettingsStore : ISettingsStore
             }
 
             using var raw = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
-            return Migrate(settings, raw.RootElement);
+            var loadedVersion = settings.SchemaVersion;
+            var migrated = Migrate(settings, raw.RootElement);
+            if (migrated.SchemaVersion != loadedVersion)
+            {
+                // Written back at once, like Android, rather than re-migrating the old file at every start until
+                // something else happens to save.
+                try
+                {
+                    WriteAsync(migrated, CancellationToken.None).GetAwaiter().GetResult();
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    _logger.LogWarning(ex, "Could not write the migrated settings back; they will be migrated again next time");
+                }
+            }
+
+            return migrated;
         }
         catch (Exception ex) when (ex is JsonException or IOException)
         {
