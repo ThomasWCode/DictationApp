@@ -144,6 +144,13 @@ repositories. The user decided five questions it raised:
 | First-run and Settings chord tests | `HotkeyService.ObserveOnly` reports the chord and starts nothing. | The wizard's "test" was a real, billed dictation. |
 | Smaller | Correction diff sets aside the shared start and end and refuses over 4,000 × 4,000 words; UIA probes no longer dispose the shared automation object and time out after 2 s; an unconnected chosen microphone falls back to the default one; one text-free timing line per dictation; migrated settings are written back; an undecryptable key shows as missing; CI builds feature branches once (PR only). | Each was a verified finding of the review. |
 
+Deliberate differences on Android: its direct insertion reads the whole field back rather than the text before
+the caret, so its uncertain case is a field that only looks like an empty stand-in (the text is kept, the dictation
+goes at its end and is also copied), and its paste path always leaves the text on the clipboard, which Android
+cannot restore. Its correction diff budget is a quarter of this one (2,000 × 2,000 words) for a phone's smaller
+heap. Bluetooth routing and "Default means the phone's own microphone" exist only there. Stopping its
+accessibility service while recording keeps the dictation for Retry, as quitting does here.
+
 Porting rule: the two apps share their core design line by line. A change to shared behaviour (session lifecycle,
 cleanup, retry, history, settings, formatting) is made in both repositories in the same round, each with its own
 regression test, and a deliberate difference is recorded in both decisions files.
