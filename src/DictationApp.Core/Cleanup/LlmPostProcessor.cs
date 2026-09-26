@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using DictationApp.Core.Abstractions;
 using DictationApp.Core.Settings;
+using DictationApp.Core.Transcription;
 using Microsoft.Extensions.Logging;
 
 namespace DictationApp.Core.Cleanup;
@@ -106,15 +107,20 @@ public sealed class LlmPostProcessor : ITextPostProcessor
             return new PostProcessResult(fallback, false, null, "no-model");
         }
 
-        var systemPrompt = PromptBuilder.BuildSystemPrompt(new PromptContext(request.Level, request.Tone, request.Keyterms, request.AppName, request.Url, request.AppHint));
+        // The model sees where the speaker paused, so it can rejoin a sentence the transcriber ended at a pause to think.
+        // Not at None, which keeps the transcript's punctuation even when a tone runs the LLM.
+        var input = request.Level != CleanupLevel.None && request.PauseMarkedTranscript is { } marked &&
+            marked.Contains(TranscriptAssembler.PauseMarker, StringComparison.Ordinal) ? marked : rawTranscript;
+        var pauseMarkers = !ReferenceEquals(input, rawTranscript);
+        var systemPrompt = PromptBuilder.BuildSystemPrompt(new PromptContext(request.Level, request.Tone, request.Keyterms, request.AppName, request.Url, request.AppHint, pauseMarkers));
         var body = new ChatRequest
         {
             Messages =
             [
                 new ChatMessage("system", systemPrompt),
-                new ChatMessage("user", rawTranscript),
+                new ChatMessage("user", input),
             ],
-            MaxTokens = MaxTokensFor(rawTranscript),
+            MaxTokens = MaxTokensFor(input),
             Temperature = 0.1,
         };
 
@@ -165,8 +171,8 @@ public sealed class LlmPostProcessor : ITextPostProcessor
                     continue;
                 }
 
-                _logger.LogInformation("LLM cleanup via {Model} in {Elapsed} ms (level={Level}, tone={Tone}, tokens={Prompt}+{Completion})", model, sw.ElapsedMilliseconds, request.Level, request.Tone, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
-                return new PostProcessResult(validation.Text, true, model, null, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
+                _logger.LogInformation("LLM cleanup via {Model} in {Elapsed} ms (level={Level}, tone={Tone}, pauses={Pauses}, tokens={Prompt}+{Completion})", model, sw.ElapsedMilliseconds, request.Level, request.Tone, pauseMarkers, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
+                return new PostProcessResult(TranscriptAssembler.RemovePauseMarkers(validation.Text), true, model, null, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {

@@ -7,7 +7,8 @@ public sealed record PostProcessRequest(
     string AppName,
     string? Url,
     string? AppHint,
-    string? ModelOverride = null);
+    string? ModelOverride = null,
+    string? PauseMarkedTranscript = null);
 
 public sealed record PostProcessResult(
     string Text,

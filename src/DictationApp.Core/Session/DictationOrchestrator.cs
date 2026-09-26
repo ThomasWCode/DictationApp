@@ -146,7 +146,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 return false;
             }
 
-            var request = new PostProcessRequest(record.Level, record.Tone, KeytermsSelector.Select(settings.Dictionary), record.ProcessName ?? string.Empty, record.Url, null);
+            var request = new PostProcessRequest(record.Level, record.Tone, KeytermsSelector.Select(settings.Dictionary), record.ProcessName ?? string.Empty, record.Url, null, PauseMarkedTranscript: transcript.PauseMarkedText);
             var result = await _postProcessor.ProcessAsync(transcript.Text, request, ct).ConfigureAwait(false);
             await _clipboard.SetTextAsync(result.Text, ct).ConfigureAwait(false);
             record.RawTranscript = transcript.Text;
@@ -209,7 +209,7 @@ public sealed class DictationOrchestrator : BackgroundService
             await sender.ConfigureAwait(false);
             var termination = await transcriber.ShutdownAsync(HandshakeCap, ct).ConfigureAwait(false);
             var duration = TimeSpan.FromSeconds((double)Interlocked.Read(ref bytes) / (AudioFrame.SampleRate * 2));
-            return new WavTranscription(assembler.FinalText, duration, transcriber.ConnectLatency, termination, sw.Elapsed);
+            return new WavTranscription(assembler.FinalText, duration, transcriber.ConnectLatency, termination, sw.Elapsed, assembler.PauseMarkedText);
         }
         finally
         {
@@ -635,7 +635,7 @@ public sealed class DictationOrchestrator : BackgroundService
             record.Tone = session.Tone;
             record.Level = session.Level;
             var keyterms = KeytermsSelector.Select(settings.Dictionary);
-            var request = new PostProcessRequest(session.Level, session.Tone, keyterms, session.Context.ProcessName, session.Context.Url, session.Rule.Hint);
+            var request = new PostProcessRequest(session.Level, session.Tone, keyterms, session.Context.ProcessName, session.Context.Url, session.Rule.Hint, PauseMarkedTranscript: session.Assembler.PauseMarkedText);
             var result = await _postProcessor.ProcessAsync(rawText, request, ct).ConfigureAwait(false);
             record.CleanedText = result.Applied ? result.Text : string.Empty;
             record.LlmModel = result.Model;
@@ -1161,4 +1161,4 @@ public sealed class DictationOrchestrator : BackgroundService
     }
 }
 
-public sealed record WavTranscription(string Text, TimeSpan AudioDuration, TimeSpan? ConnectLatency, TerminationMessage? Termination, TimeSpan WallClock);
+public sealed record WavTranscription(string Text, TimeSpan AudioDuration, TimeSpan? ConnectLatency, TerminationMessage? Termination, TimeSpan WallClock, string? PauseMarkedText = null);
