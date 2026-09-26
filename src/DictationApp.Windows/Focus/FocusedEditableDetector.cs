@@ -95,8 +95,7 @@ public sealed class FocusedEditableDetector : IDisposable
     {
         try
         {
-            _automation ??= new UIA3Automation();
-            var focused = _automation.FocusedElement();
+            var focused = Automation().FocusedElement();
             if (focused is null || focused.Properties.IsPassword.ValueOrDefault)
             {
                 return null;
@@ -140,8 +139,7 @@ public sealed class FocusedEditableDetector : IDisposable
     {
         try
         {
-            _automation ??= new UIA3Automation();
-            var focused = _automation.FocusedElement();
+            var focused = Automation().FocusedElement();
             if (focused is null)
             {
                 return null;
@@ -177,18 +175,35 @@ public sealed class FocusedEditableDetector : IDisposable
         }
         catch (Exception ex)
         {
+            // Not disposed here: a probe that timed out earlier may still be using the shared automation object.
             _logger.LogDebug(ex, "UIA focus probe failed");
-            try
-            {
-                _automation?.Dispose();
-            }
-            catch (Exception)
-            {
-            }
-
-            _automation = null;
             return null;
         }
+    }
+
+    /// <summary>
+    /// The shared automation object, created on first use. Its UI Automation timeouts end a call into an app that hangs
+    /// after 2 s, so a probe that the caller stopped waiting for does not keep running (and piling up) for long.
+    /// </summary>
+    private UIA3Automation Automation()
+    {
+        if (_automation is { } existing)
+        {
+            return existing;
+        }
+
+        var automation = new UIA3Automation();
+        try
+        {
+            automation.ConnectionTimeout = TimeSpan.FromSeconds(2);
+            automation.TransactionTimeout = TimeSpan.FromSeconds(2);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "UI Automation timeouts not available");
+        }
+
+        return _automation = automation;
     }
 
     /// <summary>Empty apart from whitespace and invisible stand-ins such as a rich editor's empty paragraph.</summary>

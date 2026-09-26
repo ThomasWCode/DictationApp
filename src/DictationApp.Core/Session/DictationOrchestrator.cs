@@ -490,6 +490,7 @@ public sealed class DictationOrchestrator : BackgroundService
             };
             capture.Faulted += session.Fault;
             capture.Start();
+            session.Mark("mic");
             session.Tone = settings.DefaultTone;
             session.Level = settings.DefaultCleanupLevel;
             PublishSession(session, DictationState.Arming, "Listening");
@@ -511,6 +512,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
             // 3. Where the user is: target window, editability, browser URL and app rule (tone and level).
             session.Context = SafeCapture();
+            session.Mark("lookup");
             // The bar already shows Listening, so an arrow key or chip may have changed the tone or level meanwhile:
             // that choice wins over the rule's, and is remembered now that it is known which rule it belongs to.
             var rule = AppRulesResolver.Resolve(session.Context, settings.AppRules, settings.DefaultTone, settings.DefaultCleanupLevel, settings.PasteMode);
@@ -573,6 +575,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 // Released after a real hold but before Begin. The release ends the recording: stop the microphone now
                 // (its last partial frame is delivered by Stop), then give the connection its remaining budget and
                 // send what was recorded. Nothing said after the release is recorded or uploaded.
+                session.Mark("release");
                 _machine.Fire(DictationTrigger.ChordUp);
                 capture.Stop();
                 session.Frames.Writer.TryComplete();
@@ -589,6 +592,7 @@ public sealed class DictationOrchestrator : BackgroundService
                     return;
                 }
 
+                session.Mark("begin");
                 await SendFramesAsync(session.Frames.Reader, transcriber, ct).ConfigureAwait(false);
             }
             else
@@ -607,6 +611,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 }
 
                 _machine.Fire(DictationTrigger.BeginReceived);
+                session.Mark("begin");
                 _logger.LogInformation("Connect latency {Latency} ms", transcriber.ConnectLatency?.TotalMilliseconds ?? -1);
                 PublishSession(session, DictationState.Recording, null);
                 sender = SendFramesAsync(session.Frames.Reader, transcriber, ct);
@@ -615,6 +620,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 var capTask = Task.Delay(settings.MaxDictationDuration, _time, capCts.Token);
                 var end = await Task.WhenAny(session.Released, session.Escaped, session.Faulted, capTask).ConfigureAwait(false);
                 capCts.Cancel();
+                session.Mark("release");
                 if (session.Escaped.IsCompleted)
                 {
                     await DiscardAsync(session, capture, sink, transcriber, "Discarded").ConfigureAwait(false);
@@ -664,6 +670,7 @@ public sealed class DictationOrchestrator : BackgroundService
             PublishSession(session, DictationState.Finalising, "Finishing");
             var termination = await transcriber.ShutdownAsync(HandshakeCap, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested(); // shutdown treats the app closing like its time cap and returns null
+            session.Mark("handshake");
             if (termination is null && !session.Faulted.IsCompleted)
             {
                 _logger.LogWarning("No Termination summary from the streaming session; the transcript may be missing its last words");
@@ -696,7 +703,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 _machine.Fire(DictationTrigger.NothingHeard);
                 sink?.Discard();
                 record.AudioPath = null;
-                _logger.LogInformation("Nothing heard");
+                _logger.LogInformation("Nothing heard (ms since the press: {Timings})", session.Timings());
                 PublishIdle("Nothing heard");
                 return;
             }
@@ -711,6 +718,7 @@ public sealed class DictationOrchestrator : BackgroundService
             var request = new PostProcessRequest(session.Level, session.Tone, keyterms, session.Context.ProcessName, session.Context.Url, session.Rule.Hint, PauseMarkedTranscript: session.Assembler.PauseMarkedText);
             var result = await _postProcessor.ProcessAsync(rawText, request, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
+            session.Mark("cleanup");
             ReportCleanupProblem(result);
             record.CleanedText = result.Applied ? result.Text : string.Empty;
             record.LlmModel = result.Model;
@@ -741,6 +749,7 @@ public sealed class DictationOrchestrator : BackgroundService
             // Insertion is the commit point: once it starts it runs to the end (paste, then clipboard restore), even if
             // the app is closing meanwhile, so it takes no cancellation token.
             var insertion = await DeliverAsync(text, target, pasteMode).ConfigureAwait(false);
+            session.Mark("insert");
             switch (insertion.Outcome)
             {
                 case InsertionOutcome.Inserted:
@@ -771,7 +780,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
             _ = BumpDictionaryUsageAsync(keyterms, rawText);
             PublishIdle(badge);
-            _logger.LogInformation("Dictation {Status}: {Words} words, {Duration:0.0}s audio, llm={Model}", record.Status, CountWords(text), audioSeconds, result.Model ?? "none");
+            _logger.LogInformation("Dictation {Status}: {Words} words, {Duration:0.0}s audio, llm={Model} (ms since the press: {Timings})", record.Status, CountWords(text), audioSeconds, result.Model ?? "none", session.Timings());
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -1337,6 +1346,8 @@ public sealed class DictationOrchestrator : BackgroundService
         private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _escaped = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<Exception> _faulted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly List<(string Phase, long Ms)> _marks = [];
         private int _releaseKind = -1; // -1 not released, 0 hold, 1 tap
         private long _bytes;
         private IStreamingTranscriber? _transcriber;
@@ -1382,6 +1393,27 @@ public sealed class DictationOrchestrator : BackgroundService
         public Task Escaped => _escaped.Task;
 
         public Task<Exception> Faulted => _faulted.Task;
+
+        /// <summary>Notes when a phase was reached, for the one timing line logged per dictation (no text).</summary>
+        public void Mark(string phase)
+        {
+            lock (_marks)
+            {
+                if (!_marks.Exists(m => m.Phase == phase))
+                {
+                    _marks.Add((phase, _clock.ElapsedMilliseconds));
+                }
+            }
+        }
+
+        /// <summary>For example "mic 21, lookup 180, begin 902, release 3410, handshake 4120, cleanup 4800, insert 5130".</summary>
+        public string Timings()
+        {
+            lock (_marks)
+            {
+                return string.Join(", ", _marks.Select(m => $"{m.Phase} {m.Ms}"));
+            }
+        }
 
         /// <summary>True when the first release of this session was a lone tap (the dictation is being cancelled).</summary>
         public bool ReleasedAsTap => Volatile.Read(ref _releaseKind) == 1;

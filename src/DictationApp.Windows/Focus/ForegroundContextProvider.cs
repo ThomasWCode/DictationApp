@@ -128,9 +128,8 @@ public sealed class ForegroundContextProvider : IForegroundContextProvider, IDis
             }
             catch (Exception ex)
             {
+                // Not disposed here: a read that timed out earlier may still be using the shared automation object.
                 _logger.LogDebug(ex, "Address bar read failed");
-                _automation?.Dispose();
-                _automation = null;
             }
 
             return null;
