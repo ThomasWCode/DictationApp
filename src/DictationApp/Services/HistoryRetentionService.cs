@@ -1,20 +1,18 @@
 using System.Diagnostics;
-using System.IO;
 using DictationApp.Core.Abstractions;
 using DictationApp.Core.History;
-using DictationApp.Core.Settings;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace DictationApp.Services;
 
 /// <summary>
-/// Applies the retention policies at startup and hourly: records older than the history retention are
-/// deleted (with their WAVs); audio older than the audio retention is deleted while the text stays.
-/// Orphan WAVs (no record references them) older than a day are swept too. Before the first pass, recordings a
-/// previous run left unfinished (killed, crashed, power cut) are recovered into History for Retry.
+/// Applies the retention policies at startup and hourly (<see cref="HistoryMaintenance.RunRetentionPassAsync"/>):
+/// records older than the history retention are deleted (with their WAVs); audio older than the audio retention is
+/// deleted while the text stays; orphan WAVs older than a day are swept. The first successful pass of a run first
+/// recovers recordings a previous run left unfinished (killed, crashed, power cut) into History for Retry.
 /// </summary>
-public sealed class HistoryRetentionService(IHistoryRepository history, ISettingsStore settings, HistoryMaintenance maintenance, INotifier notifier, ILogger<HistoryRetentionService> logger, TimeProvider time) : BackgroundService
+public sealed class HistoryRetentionService(HistoryMaintenance maintenance, INotifier notifier, ILogger<HistoryRetentionService> logger, TimeProvider time) : BackgroundService
 {
     public static readonly TimeSpan Interval = TimeSpan.FromHours(1);
     public static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(15);
@@ -41,35 +39,22 @@ public sealed class HistoryRetentionService(IHistoryRepository history, ISetting
     {
         try
         {
-            if (!_recovered)
+            // Recovery is marked done only once a pass succeeds: a database error leaves it for the next pass.
+            var pass = await maintenance.RunRetentionPassAsync(_recovered ? null : RunStartedAt(), ct);
+            _recovered = true;
+            if (pass.Recovered > 0)
             {
-                _recovered = true;
-                await RecoverInterruptedAsync(ct);
+                notifier.Toast(
+                    "Dictation recovered",
+                    pass.Recovered == 1
+                        ? "A dictation interrupted when DictationApp last stopped is in History. Use Retry to transcribe it."
+                        : $"{pass.Recovered} dictations interrupted when DictationApp last stopped are in History. Use Retry to transcribe them.",
+                    ToastKind.Info);
             }
 
-            var s = settings.Current;
-            var now = time.GetUtcNow();
-            var deleted = 0;
-
-            // Judged before this pass deletes anything: a History with no records at all (a lost or recreated
-            // database) skips the orphan sweep, but one emptied by retention now still gets its orphans swept.
-            var historyWasEmpty = (await history.GetStatsAsync(ct)).Count == 0;
-            if (s.HistoryRetention.ToTimeSpan() is { } keep)
+            if (pass.RemovedFiles > 0)
             {
-                var paths = await history.DeleteOlderThanAsync(now - keep, ct);
-                deleted += DeleteFiles(paths);
-            }
-
-            if (s.AudioRetention.ToTimeSpan() is { } keepAudio)
-            {
-                var paths = await history.ClearAudioOlderThanAsync(now - keepAudio, ct);
-                deleted += DeleteFiles(paths);
-            }
-
-            deleted += await maintenance.SweepOrphansAsync(ct, historyWasEmpty);
-            if (deleted > 0)
-            {
-                logger.LogInformation("Retention removed {Count} audio files", deleted);
+                logger.LogInformation("Retention removed {Count} audio files", pass.RemovedFiles);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -78,46 +63,10 @@ public sealed class HistoryRetentionService(IHistoryRepository history, ISetting
         }
     }
 
-    /// <summary>Once per run, before the orphan sweep could delete them: files this run did not write.</summary>
-    private async Task RecoverInterruptedAsync(CancellationToken ct)
+    /// <summary>Files last written before this are from an earlier run; this run's may still be recording.</summary>
+    private static DateTimeOffset RunStartedAt()
     {
-        DateTimeOffset runStartedAt;
-        using (var process = Process.GetCurrentProcess())
-        {
-            runStartedAt = new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
-        }
-
-        var recovered = await maintenance.RecoverInterruptedAsync(runStartedAt, ct);
-        if (recovered > 0)
-        {
-            notifier.Toast(
-                "Dictation recovered",
-                recovered == 1
-                    ? "A dictation interrupted when DictationApp last stopped is in History. Use Retry to transcribe it."
-                    : $"{recovered} dictations interrupted when DictationApp last stopped are in History. Use Retry to transcribe them.",
-                ToastKind.Info);
-        }
-    }
-
-    private int DeleteFiles(IEnumerable<string> files)
-    {
-        var count = 0;
-        foreach (var file in files)
-        {
-            try
-            {
-                if (File.Exists(file))
-                {
-                    File.Delete(file);
-                    count++;
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                logger.LogDebug(ex, "Could not delete {File}", file);
-            }
-        }
-
-        return count;
+        using var process = Process.GetCurrentProcess();
+        return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
     }
 }

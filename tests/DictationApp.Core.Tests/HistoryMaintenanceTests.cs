@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using DictationApp.Core.Abstractions;
 using DictationApp.Core.Cleanup;
 using DictationApp.Core.History;
 using DictationApp.Core.Settings;
@@ -11,6 +12,23 @@ namespace DictationApp.Core.Tests;
 /// <summary>Orphan sweep, "Delete all" and the recovery of interrupted recordings, on real files and a real database.</summary>
 public sealed class HistoryMaintenanceTests : IDisposable
 {
+    /// <summary>The app's logger: its file handle is closed while the logs are deleted.</summary>
+    private sealed class FakeLogFiles : ILogFileControl
+    {
+        public IDisposable? OpenFile { get; set; }
+
+        public int Closes { get; private set; }
+
+        public T WhileClosed<T>(Func<T> action)
+        {
+            Closes++;
+            OpenFile?.Dispose();
+            OpenFile = null;
+            return action();
+        }
+    }
+
+    private readonly FakeLogFiles _logFiles = new();
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "DictationAppTests", Guid.NewGuid().ToString("N"));
     private readonly FakeTimeProvider _clock = new(new DateTimeOffset(2026, 9, 26, 12, 0, 0, TimeSpan.Zero));
     private readonly AppPaths _paths;
@@ -24,7 +42,7 @@ public sealed class HistoryMaintenanceTests : IDisposable
         _paths.EnsureDirectories();
         _repo = new SqliteHistoryRepository(_paths.HistoryDb, NullLogger<SqliteHistoryRepository>.Instance);
         _settings = new JsonSettingsStore(_paths.SettingsFile, NullLogger<JsonSettingsStore>.Instance);
-        _maintenance = new HistoryMaintenance(_repo, _settings, _paths, _clock, NullLogger<HistoryMaintenance>.Instance);
+        _maintenance = new HistoryMaintenance(_repo, _settings, _paths, _clock, NullLogger<HistoryMaintenance>.Instance, _logFiles);
     }
 
     private DateTime Now => _clock.GetUtcNow().UtcDateTime;
@@ -127,10 +145,10 @@ public sealed class HistoryMaintenanceTests : IDisposable
 
         DeleteAllResult result;
         using (File.Open(locked, FileMode.Open, FileAccess.Read, FileShare.Read)) // playing, say
-        using (new FileStream(todayLog, FileMode.Append, FileAccess.Write, FileShare.ReadWrite)) // the logger's handle
         {
+            // The logger's handle on today's log, closed while the logs are deleted.
+            _logFiles.OpenFile = new FileStream(todayLog, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
             result = await _maintenance.DeleteAllAsync(CancellationToken.None);
-            Assert.Equal(0, new FileInfo(todayLog).Length);
         }
 
         Assert.Empty(await _repo.SearchAsync(null));
@@ -139,7 +157,40 @@ public sealed class HistoryMaintenanceTests : IDisposable
         Assert.True(File.Exists(recording));
         Assert.True(File.Exists(locked));
         Assert.False(File.Exists(oldLog));
+        Assert.False(File.Exists(todayLog));
+        Assert.Equal(1, _logFiles.Closes);
         Assert.Equal(new DeleteAllResult(RecordingsRemoved: 2, RecordingsKept: 2, LogsCleared: 2, LogsKept: 0), result);
+    }
+
+    [Fact]
+    public async Task The_orphan_sweep_leaves_unfinished_recordings_for_recovery()
+    {
+        // A failed save leaves its recording unfinished and unlisted until the next start lists it; the hourly sweep of
+        // a long-running app must not delete it first.
+        await Record(null, _clock.GetUtcNow());
+        var unfinished = Wav("20260924-100000-aaaaaaaa.wav", Now.AddDays(-2), finished: false);
+        var orphan = Wav("20260924-110000-bbbbbbbb.wav", Now.AddDays(-2));
+
+        Assert.Equal(1, await _maintenance.SweepOrphansAsync(CancellationToken.None));
+        Assert.True(File.Exists(unfinished));
+        Assert.False(File.Exists(orphan));
+    }
+
+    [Fact]
+    public async Task A_lost_database_skips_the_sweep_even_after_recovery_lists_a_recording()
+    {
+        // An empty History (lost or recreated) with an unfinished recording from an earlier run: the pass recovers it,
+        // and the other recordings, which no record lists any more, are not swept as orphans.
+        var runStart = Now.AddMinutes(-1);
+        var interrupted = Wav("20260924-100000-aaaaaaaa.wav", runStart.AddDays(-2), finished: false);
+        var unlisted = Wav("20260924-110000-bbbbbbbb.wav", runStart.AddDays(-2));
+
+        var pass = await _maintenance.RunRetentionPassAsync(runStart, CancellationToken.None);
+
+        Assert.Equal(new RetentionPass(Recovered: 1, RemovedFiles: 0), pass);
+        Assert.True(File.Exists(interrupted));
+        Assert.True(File.Exists(unlisted));
+        Assert.Equal(interrupted, Assert.Single(await _repo.SearchAsync(null)).AudioPath);
     }
 
     [Fact]

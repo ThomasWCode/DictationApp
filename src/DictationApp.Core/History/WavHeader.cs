@@ -42,45 +42,15 @@ public static class WavHeader
     {
         pcmBytes = 0;
         using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
-        Span<byte> head = stackalloc byte[12];
-        if (stream.Read(head) < head.Length || !head[..4].SequenceEqual("RIFF"u8) || !head[8..12].SequenceEqual("WAVE"u8))
-        {
-            return false;
-        }
-
-        var riffSize = BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]);
-        Span<byte> chunk = stackalloc byte[8];
-        long position = 12;
-        long dataOffset = -1;
-        uint dataSize = 0;
-        while (position + chunk.Length <= stream.Length)
-        {
-            stream.Position = position;
-            if (stream.Read(chunk) < chunk.Length)
-            {
-                break;
-            }
-
-            var size = BinaryPrimitives.ReadUInt32LittleEndian(chunk[4..]);
-            if (chunk[..4].SequenceEqual("data"u8))
-            {
-                dataOffset = position + chunk.Length;
-                dataSize = size;
-                break;
-            }
-
-            position += chunk.Length + size + (size & 1);
-        }
-
-        if (dataOffset < 0)
+        if (!TryReadLayout(stream, out var riffSize, out var dataOffset, out var dataSize))
         {
             return false;
         }
 
         var pcm = (stream.Length - dataOffset) & ~1L;
-        if (riffSize != 0 && !(dataSize == 0 && pcm > 0))
+        if (!Unfinished(riffSize, dataSize, pcm))
         {
-            return false; // finished
+            return false;
         }
 
         stream.SetLength(dataOffset + pcm);
@@ -94,5 +64,52 @@ public static class WavHeader
         stream.Flush(flushToDisk: true);
         pcmBytes = pcm;
         return true;
+    }
+
+    /// <summary>True when <paramref name="path"/> is an unfinished recording. Reads only; the file is left as it is.</summary>
+    public static bool IsUnfinished(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return TryReadLayout(stream, out var riffSize, out var dataOffset, out var dataSize) && Unfinished(riffSize, dataSize, (stream.Length - dataOffset) & ~1L);
+    }
+
+    /// <summary>A RIFF size of zero, or a data size of zero with audio after the header: the sizes were never written.</summary>
+    private static bool Unfinished(uint riffSize, uint dataSize, long pcmBytes) => riffSize == 0 || (dataSize == 0 && pcmBytes > 0);
+
+    /// <summary>The RIFF size and where the data chunk starts; walks the chunks, so any PCM layout works.</summary>
+    private static bool TryReadLayout(Stream stream, out uint riffSize, out long dataOffset, out uint dataSize)
+    {
+        riffSize = 0;
+        dataOffset = -1;
+        dataSize = 0;
+        Span<byte> head = stackalloc byte[12];
+        if (stream.Read(head) < head.Length || !head[..4].SequenceEqual("RIFF"u8) || !head[8..12].SequenceEqual("WAVE"u8))
+        {
+            return false;
+        }
+
+        riffSize = BinaryPrimitives.ReadUInt32LittleEndian(head[4..8]);
+        Span<byte> chunk = stackalloc byte[8];
+        long position = 12;
+        while (position + chunk.Length <= stream.Length)
+        {
+            stream.Position = position;
+            if (stream.Read(chunk) < chunk.Length)
+            {
+                break;
+            }
+
+            var size = BinaryPrimitives.ReadUInt32LittleEndian(chunk[4..]);
+            if (chunk[..4].SequenceEqual("data"u8))
+            {
+                dataOffset = position + chunk.Length;
+                dataSize = size;
+                return true;
+            }
+
+            position += chunk.Length + size + (size & 1);
+        }
+
+        return false;
     }
 }
