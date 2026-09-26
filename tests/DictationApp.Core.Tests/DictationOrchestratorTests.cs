@@ -483,6 +483,79 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_paste_that_could_not_be_confirmed_leaves_the_text_on_the_clipboard_too()
+    {
+        _inserter.Result = new InsertionResult(InsertionOutcome.Inserted, "Pasted into notepad; also on the clipboard", LeftOnClipboard: true);
+        await StartAsync();
+        await DictateAsync("Unsure.");
+
+        Assert.Equal(RecordStatus.Inserted, Assert.Single(_history.Records).Status);
+        Assert.Equal("also copied", _hub.Current.Badge);
+        Assert.Empty(_notifier.Toasts);
+    }
+
+    [Fact]
+    public async Task A_paste_the_target_refused_is_copied_with_a_toast_and_forgets_the_spacing_memory()
+    {
+        await StartAsync();
+        await DictateAsync("First.");                  // remembered: the next text would get a leading space
+        _inserter.Result = new InsertionResult(InsertionOutcome.CopiedOnly, "Could not bring notepad to the front, text copied");
+        await DictateAsync("Second.");
+        Assert.Equal(RecordStatus.CopiedOnly, _history.Records[^1].Status);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Copied to clipboard" && t.Message.Contains("front", StringComparison.Ordinal));
+
+        _inserter.Result = new InsertionResult(InsertionOutcome.Inserted);
+        await DictateAsync("Third.");
+        Assert.Equal("Third. [cleaned]", _inserter.LastText); // "Second." never landed there, so no leading space
+    }
+
+    [Fact]
+    public async Task A_failed_paste_puts_the_text_on_the_clipboard_and_says_so()
+    {
+        _inserter.Result = new InsertionResult(InsertionOutcome.Failed, "Clipboard busy");
+        await StartAsync();
+        await DictateAsync("Keep me.");
+
+        Assert.Equal("Keep me. [cleaned]", _clipboard.Text);
+        var record = Assert.Single(_history.Records);
+        Assert.Equal(RecordStatus.Failed, record.Status);
+        Assert.Contains("Clipboard busy", record.FailureReason);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Could not insert" && t.Message.Contains("copied", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Re_insert_uses_the_same_checks_and_toasts_as_a_live_dictation()
+    {
+        await StartAsync();
+        _foreground.TextBeforeCaret = "";
+        var ok = await _orchestrator.ReInsertAsync(" Earlier text.", CancellationToken.None);
+        Assert.Equal(InsertionOutcome.Inserted, ok.Outcome);
+        Assert.Equal("Earlier text.", _inserter.LastText); // the stored leading space is decided afresh
+
+        _foreground.Context = _foreground.Context with { IsEditable = false, EditableReason = "uia:Button" };
+        var copied = await _orchestrator.ReInsertAsync("Earlier text.", CancellationToken.None);
+        Assert.Equal(InsertionOutcome.CopiedOnly, copied.Outcome);
+        Assert.Equal("Earlier text.", _clipboard.Text);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Copied to clipboard");
+        Assert.Empty(_history.Records); // the record is not touched
+    }
+
+    [Fact]
+    public async Task Re_insert_waits_for_a_running_dictation()
+    {
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+
+        var result = await _orchestrator.ReInsertAsync("Text.", CancellationToken.None);
+
+        Assert.Equal(InsertionOutcome.Failed, result.Outcome);
+        Assert.Contains(_notifier.Toasts, t => t.Message.Contains("Finish the current dictation", StringComparison.Ordinal));
+        _hotkey.Escape();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
     public async Task The_recording_is_finished_only_after_its_record_is_saved()
     {
         // Until then its header keeps the "unfinished" marker, so a crash during cleanup or insertion leaves a file the
@@ -1139,11 +1212,14 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public PasteMode? LastPasteMode { get; private set; }
 
+        /// <summary>What the paste reports (Inserted by default).</summary>
+        public InsertionResult Result { get; set; } = new(InsertionOutcome.Inserted);
+
         public Task<InsertionResult> InsertAsync(string text, ForegroundContext target, PasteMode pasteMode, CancellationToken ct)
         {
             LastText = text;
             LastPasteMode = pasteMode;
-            return Task.FromResult(new InsertionResult(InsertionOutcome.Inserted));
+            return Task.FromResult(Result);
         }
     }
 

@@ -66,6 +66,10 @@ public sealed class DictationOrchestrator : BackgroundService
     private readonly Channel<ControlEvent> _events = Channel.CreateUnbounded<ControlEvent>(new UnboundedChannelOptions { SingleReader = true });
     private readonly SemaphoreSlim _replayGate = new(1, 1);
     private readonly HashSet<string> _reportedCleanupProblems = [];
+
+    // Clipboard writers take turns (a paste with its snapshot and restore, Re-insert, a Retry's copy), so one can never
+    // restore the clipboard over another's text.
+    private readonly SemaphoreSlim _clipboardGate = new(1, 1);
     private DictationSession? _session;
     private Task? _sessionTask;
 
@@ -175,7 +179,16 @@ public sealed class DictationOrchestrator : BackgroundService
             var request = new PostProcessRequest(record.Level, record.Tone, KeytermsSelector.Select(settings.Dictionary), record.ProcessName ?? string.Empty, record.Url, null, PauseMarkedTranscript: transcript.PauseMarkedText);
             var result = await _postProcessor.ProcessAsync(transcript.Text, request, ct).ConfigureAwait(false);
             ReportCleanupProblem(result);
-            await _clipboard.SetTextAsync(result.Text, ct).ConfigureAwait(false);
+            await _clipboardGate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await _clipboard.SetTextAsync(result.Text, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                _clipboardGate.Release();
+            }
+
             record.RawTranscript = transcript.Text;
             record.CleanedText = result.Applied ? result.Text : string.Empty;
             record.InsertedText = result.Text;
@@ -724,35 +737,28 @@ public sealed class DictationOrchestrator : BackgroundService
 
             var text = _formatter.Format(result.Text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
             record.InsertedText = text;
-            InsertionResult insertion;
+
             // Insertion is the commit point: once it starts it runs to the end (paste, then clipboard restore), even if
             // the app is closing meanwhile, so it takes no cancellation token.
-            if (target.IsEditable && !target.IsElevated)
-            {
-                insertion = await _inserter.InsertAsync(text, target, pasteMode, CancellationToken.None).ConfigureAwait(false);
-            }
-            else
-            {
-                await _clipboard.SetTextAsync(text, CancellationToken.None).ConfigureAwait(false);
-                insertion = new InsertionResult(InsertionOutcome.CopiedOnly, target.IsElevated ? "Target is elevated, text copied" : "No text box has focus, text copied");
-            }
-
+            var insertion = await DeliverAsync(text, target, pasteMode).ConfigureAwait(false);
             switch (insertion.Outcome)
             {
                 case InsertionOutcome.Inserted:
                     record.Status = RecordStatus.Inserted;
+                    if (insertion.LeftOnClipboard)
+                    {
+                        badge = badge is null ? "also copied" : badge + " · also copied";
+                    }
+
                     _machine.Fire(DictationTrigger.Inserted);
                     break;
                 case InsertionOutcome.CopiedOnly:
                     record.Status = RecordStatus.CopiedOnly;
-                    _notifier.Toast("Copied to clipboard", insertion.Reason ?? "Paste it where you need it.", ToastKind.Info);
                     _machine.Fire(DictationTrigger.CopiedOnly);
                     break;
                 default:
                     record.Status = RecordStatus.Failed;
                     record.FailureReason = AppendReason(record.FailureReason, insertion.Reason);
-                    await _clipboard.SetTextAsync(text, CancellationToken.None).ConfigureAwait(false);
-                    _notifier.Toast("Could not insert", (insertion.Reason ?? "Unknown error") + ". Text copied to the clipboard.", ToastKind.Warning);
                     _machine.Fire(DictationTrigger.Failed);
                     break;
             }
@@ -954,6 +960,86 @@ public sealed class DictationOrchestrator : BackgroundService
         }
 
         PublishIdle("Failed");
+    }
+
+    /// <summary>
+    /// History's Re-insert: into the window that has focus now, with the same checks, spacing, paste keystroke and outcome
+    /// toasts as a live dictation. The record itself is not changed.
+    /// </summary>
+    public async Task<InsertionResult> ReInsertAsync(string text, CancellationToken ct)
+    {
+        if (!_machine.IsIdle)
+        {
+            _notifier.Toast("Re-insert", "Finish the current dictation first.", ToastKind.Warning);
+            return new InsertionResult(InsertionOutcome.Failed, "A dictation is running");
+        }
+
+        ct.ThrowIfCancellationRequested();
+        var target = SafeCapture();
+
+        // The stored text carries the spacing of where it first went; the new field decides afresh.
+        var formatted = _formatter.Format(text.TrimStart(), target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+        var insertion = await DeliverAsync(formatted, target, PasteModeFor(target, _settings.Current)).ConfigureAwait(false);
+        _logger.LogInformation("Re-insert into {Process}: {Outcome}", target.ProcessName, insertion.Outcome);
+        return insertion;
+    }
+
+    /// <summary>
+    /// Delivers <paramref name="text"/> into <paramref name="target"/>: a paste when it looks editable and is not
+    /// elevated, the clipboard otherwise, and the clipboard as well when the paste fails. Shows the toast for a copy or a
+    /// failure, and forgets the spacing memory of a window the text did not reach. Never cancelled half-way.
+    /// </summary>
+    private async Task<InsertionResult> DeliverAsync(string text, ForegroundContext target, PasteMode pasteMode)
+    {
+        InsertionResult insertion;
+        var copiedAfterFailure = false;
+        await _clipboardGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Copied text will be pasted by hand somewhere else, so it carries no joining space.
+            insertion = target.IsEditable && !target.IsElevated
+                ? await _inserter.InsertAsync(text, target, pasteMode, CancellationToken.None).ConfigureAwait(false)
+                : await CopyAsync(text.TrimStart(), target.IsElevated ? "Target is elevated, text copied" : "No text box has focus, text copied").ConfigureAwait(false);
+            if (insertion.Outcome == InsertionOutcome.Failed && target.IsEditable && !target.IsElevated)
+            {
+                copiedAfterFailure = (await CopyAsync(text.TrimStart(), null).ConfigureAwait(false)).Outcome == InsertionOutcome.CopiedOnly;
+            }
+        }
+        finally
+        {
+            _clipboardGate.Release();
+        }
+
+        switch (insertion.Outcome)
+        {
+            case InsertionOutcome.CopiedOnly:
+                _notifier.Toast("Copied to clipboard", insertion.Reason ?? "Paste it where you need it.", ToastKind.Info);
+                break;
+            case InsertionOutcome.Failed:
+                _notifier.Toast("Could not insert", (insertion.Reason ?? "Unknown error") + (copiedAfterFailure ? ". Text copied to the clipboard." : ". Use Copy in History."), ToastKind.Warning);
+                break;
+        }
+
+        if (insertion.Outcome != InsertionOutcome.Inserted)
+        {
+            _formatter.Reset(target.WindowHandle); // what is before the caret there is not what was remembered
+        }
+
+        return insertion;
+    }
+
+    private async Task<InsertionResult> CopyAsync(string text, string? reason)
+    {
+        try
+        {
+            await _clipboard.SetTextAsync(text, CancellationToken.None).ConfigureAwait(false);
+            return new InsertionResult(InsertionOutcome.CopiedOnly, reason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not put the text on the clipboard");
+            return new InsertionResult(InsertionOutcome.Failed, AppendReason(reason, "the clipboard could not be set: " + ex.Message));
+        }
     }
 
     /// <summary>

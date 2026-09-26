@@ -9,8 +9,8 @@ namespace DictationApp.Windows.Focus;
 /// <summary>
 /// Decides whether the focused control can take pasted text. Order: UI Automation focused element →
 /// caret presence via GetGUIThreadInfo → per-process allowlist → default editable. "Unknown" is treated
-/// as editable because a paste into a non-editable control is a harmless no-op and the text stays on the
-/// clipboard anyway.
+/// as editable because a paste into a non-editable control is a harmless no-op, and a paste the inserter cannot
+/// confirm afterwards (by reading the text before the caret) leaves the text on the clipboard as well.
 /// </summary>
 public sealed class FocusedEditableDetector : IDisposable
 {
@@ -50,7 +50,7 @@ public sealed class FocusedEditableDetector : IDisposable
         _logger = logger;
     }
 
-    public (bool Editable, string Reason) Detect(nint foregroundHwnd, uint threadId, string processName)
+    public (bool Editable, string Reason) Detect(uint threadId, string processName)
     {
         // 1. UI Automation, time-boxed: some apps stall UIA calls for seconds.
         var uia = RunWithBudget(() => ProbeUia(), UiaBudget);
@@ -70,12 +70,6 @@ public sealed class FocusedEditableDetector : IDisposable
         if (Allowlist.Contains(processName))
         {
             return (true, "allowlist");
-        }
-
-        // 4. The desktop / Explorer shell with nothing focused is the classic "no text box" case.
-        if (string.Equals(processName, "explorer", StringComparison.OrdinalIgnoreCase) && foregroundHwnd == 0)
-        {
-            return (false, "desktop");
         }
 
         return (true, "default");
