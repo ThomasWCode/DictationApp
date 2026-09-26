@@ -36,6 +36,22 @@ public class SettingsEditTrackerTests
         public List<AppRule> Rules { get; }
 
         public void SaveInto(AppSettings latest) => Tracker.Diff(Tone, Level, Hotkey, Terms, Rules).ApplyTo(latest);
+
+        /// <summary>What the window does when settings change elsewhere: it shows terms it does not know yet.</summary>
+        public void Refresh(AppSettings latest)
+        {
+            foreach (var term in latest.Dictionary)
+            {
+                if (Terms.Any(t => string.Equals(t.Term.Trim(), term.Term.Trim(), StringComparison.OrdinalIgnoreCase)) || Tracker.Knows(term.Term))
+                {
+                    continue;
+                }
+
+                var copy = term.Clone();
+                Terms.Insert(0, copy);
+                Tracker.Track(copy);
+            }
+        }
     }
 
     private static AppSettings Settings() => new()
@@ -122,8 +138,28 @@ public class SettingsEditTrackerTests
         var latest = Settings();
         var window = new Window(latest);
         window.Terms.Clear();
+        latest.Dictionary.Add(new DictionaryTerm { Term = "Tuberculosis" }); // added elsewhere meanwhile
 
-        Assert.True(window.Tracker.RemovedHere("lshtm", window.Terms));
-        Assert.False(window.Tracker.RemovedHere("Tuberculosis", window.Terms));
+        window.Refresh(latest);
+
+        Assert.Equal(["Tuberculosis"], window.Terms.Select(t => t.Term));
+    }
+
+    [Fact]
+    public void A_term_renamed_here_is_not_brought_back_by_a_refresh_and_survives_the_save()
+    {
+        // A dictation elsewhere bumps the stored term's use count while its rename is pending in the window.
+        var latest = Settings();
+        var window = new Window(latest);
+        window.Terms[0].Term = "LSHTM London";
+        latest.Dictionary[0].UseCount++;
+
+        window.Refresh(latest);
+        window.SaveInto(latest);
+
+        Assert.Equal("LSHTM London", Assert.Single(window.Terms).Term);
+        var saved = Assert.Single(latest.Dictionary);
+        Assert.Equal("LSHTM London", saved.Term);
+        Assert.Equal(4, saved.UseCount);
     }
 }
