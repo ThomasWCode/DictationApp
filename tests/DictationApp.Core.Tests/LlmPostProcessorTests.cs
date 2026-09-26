@@ -78,6 +78,60 @@ public class LlmPostProcessorTests
     }
 
     [Fact]
+    public async Task The_model_sees_the_pauses_and_no_marker_reaches_the_text()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Typing into the box [pause] still adds a space.")));
+        var request = Request with { PauseMarkedTranscript = "Typing into the box [pause] still adds a space." };
+
+        var result = await p.ProcessAsync("Typing into the box. Still adds a space.", request, CancellationToken.None);
+
+        Assert.Contains("Typing into the box [pause] still adds a space.", handler.Calls[0].Body);
+        Assert.Contains("marks where the speaker stopped", handler.Calls[0].Body);
+        Assert.Equal("Typing into the box still adds a space.", result.Text);
+    }
+
+    [Fact]
+    public async Task Output_is_validated_after_pause_markers_are_removed()
+    {
+        // A banned prefix hidden behind a marker, then replies that are nothing but markers: all fall back.
+        var (p, _, _) = Create((_, n, _) => Task.FromResult(Ok(n == 1 ? "[pause] Sure! Here is your text." : "[pause] [pause] [pause] [pause] [pause] [pause] [pause] [pause]")), fallbacks: ["b", "c"]);
+        var request = Request with { PauseMarkedTranscript = "Typing into the box [pause] still adds a space." };
+
+        var result = await p.ProcessAsync("Typing into the box. Still adds a space.", request, CancellationToken.None);
+
+        Assert.False(result.Applied);
+        Assert.Equal("Typing into the box. Still adds a space.", result.Text);
+    }
+
+    [Fact]
+    public async Task Literal_pause_markers_in_the_speakers_words_are_kept()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Type [pause] where the recording stops.")));
+
+        // One turn: nothing was joined, so the marked text equals the transcript and the words are left alone.
+        var single = Request with { PauseMarkedTranscript = "Type [pause] where the recording stops." };
+        var result = await p.ProcessAsync("Type [pause] where the recording stops.", single, CancellationToken.None);
+        Assert.Equal("Type [pause] where the recording stops.", result.Text);
+        Assert.DoesNotContain("marks where the speaker stopped", handler.Calls[0].Body);
+
+        // Several turns, but the speaker said the marker: no markers are used at all.
+        var joined = Request with { PauseMarkedTranscript = "Type [pause] here [pause] then stop." };
+        await p.ProcessAsync("Type [pause] here. Then stop.", joined, CancellationToken.None);
+        Assert.DoesNotContain("marks where the speaker stopped", handler.Calls[1].Body);
+    }
+
+    [Fact]
+    public async Task Level_none_keeps_the_transcript_punctuation()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Typing into the box. Still adds a space.")));
+        var request = Request with { Level = CleanupLevel.None, Tone = Tone.Formal, PauseMarkedTranscript = "Typing into the box [pause] still adds a space." };
+
+        await p.ProcessAsync("Typing into the box. Still adds a space.", request, CancellationToken.None);
+
+        Assert.DoesNotContain("[pause]", handler.Calls[0].Body);
+    }
+
+    [Fact]
     public async Task Reasoning_models_are_asked_for_low_effort()
     {
         var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Clean text here now.")), model: "openai/gpt-oss-120b");
