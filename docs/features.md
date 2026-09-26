@@ -136,10 +136,12 @@ model used and failure reason. The History window offers:
 - a footer with count, records with audio and total estimated cost.
 
 Retention: text for 24 h / 14 days / forever, audio separately for 24 h / 14 days / forever. A background
-service purges at startup and hourly and also sweeps WAVs no record refers to (after a day). A recording left
-unfinished by a crash, a kill or a power cut is recovered into History as Failed at the next start, for Retry.
-"Store audio" can be switched off entirely. "Delete all history" deletes every record, every recording in the audio
-folder (including ones no record refers to) and the logs; a recording still in progress is kept and counted.
+service purges at startup and hourly and also sweeps WAVs no record refers to (after a day), except unfinished
+ones. A recording left unfinished by a crash, a kill or a power cut (or by a save that failed) is recovered into
+History as Failed at the next start, for Retry. "Store audio" can be switched off entirely. "Delete all history"
+deletes every record, every recording in the audio folder (including ones no record refers to) and every log file
+(the logger closes today's file for that moment and then starts a new one); a recording still in progress is kept
+and counted.
 
 ## Settings
 
