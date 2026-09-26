@@ -1,14 +1,16 @@
 using System.Globalization;
+using DictationApp.Core.Abstractions;
 using DictationApp.Core.Settings;
 using Microsoft.Extensions.Logging;
 
 namespace DictationApp.Core.History;
 
 /// <summary>
-/// Keeps the recordings folder and History consistent: the hourly orphan sweep, "Delete all history", and the recovery
-/// of recordings an interrupted run left behind. Used by the retention service and by Settings.
+/// Keeps the recordings folder and History consistent: the retention pass (startup and hourly) with its orphan sweep,
+/// "Delete all history", and the recovery of recordings an interrupted run left behind. Used by the retention service
+/// and by Settings. <paramref name="logFiles"/> closes the open log file while "Delete all" deletes the logs.
 /// </summary>
-public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStore settings, AppPaths paths, TimeProvider time, ILogger<HistoryMaintenance> logger)
+public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStore settings, AppPaths paths, TimeProvider time, ILogger<HistoryMaintenance> logger, ILogFileControl? logFiles = null)
 {
     /// <summary>The hourly sweep leaves recordings with no History record alone for this long.</summary>
     public static readonly TimeSpan OrphanGrace = TimeSpan.FromDays(1);
@@ -22,11 +24,40 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     public const string RecoveredReason = "Interrupted: DictationApp stopped during this dictation (recovered at the next start)";
 
     /// <summary>
+    /// One retention pass, at startup and hourly. The first pass of a run (<paramref name="recoverFrom"/> set to when the
+    /// run started) first lists recordings an earlier run left unfinished; then records past the history retention are
+    /// deleted, audio past the audio retention is removed, and orphaned recordings are swept. Whether History was empty
+    /// is judged before any of that: a lost or recreated database skips the sweep even once recovery has listed a
+    /// recording in it. A database error ends the pass (the caller retries recovery at the next pass).
+    /// </summary>
+    public async Task<RetentionPass> RunRetentionPassAsync(DateTimeOffset? recoverFrom, CancellationToken ct)
+    {
+        var historyWasEmpty = (await history.GetStatsAsync(ct).ConfigureAwait(false)).Count == 0;
+        var recovered = recoverFrom is { } from ? await RecoverInterruptedAsync(from, ct).ConfigureAwait(false) : 0;
+        var s = settings.Current;
+        var now = time.GetUtcNow();
+        var removed = 0;
+        if (s.HistoryRetention.ToTimeSpan() is { } keep)
+        {
+            removed += DeleteFiles(await history.DeleteOlderThanAsync(now - keep, ct).ConfigureAwait(false));
+        }
+
+        if (s.AudioRetention.ToTimeSpan() is { } keepAudio)
+        {
+            removed += DeleteFiles(await history.ClearAudioOlderThanAsync(now - keepAudio, ct).ConfigureAwait(false));
+        }
+
+        removed += await SweepOrphansAsync(ct, historyWasEmpty).ConfigureAwait(false);
+        return new RetentionPass(recovered, removed);
+    }
+
+    /// <summary>
     /// Deletes recordings no History record refers to, once older than <see cref="OrphanGrace"/>. The referenced set
     /// comes from every record, not a page of the newest ones (with more than 5,000 records the audio of older ones was
     /// deleted). An empty History (a lost or recreated database) skips the sweep rather than treat every recording as
     /// an orphan; "Delete all" empties the folder itself. <paramref name="historyWasEmpty"/> is that judgement made
-    /// before a retention pass deleted anything (checked now when null).
+    /// before a retention pass changed anything (checked now when null). An unfinished recording is never swept: it is
+    /// one a failed save or an interrupted run left for recovery at the next start.
     /// </summary>
     public async Task<int> SweepOrphansAsync(CancellationToken ct, bool? historyWasEmpty = null)
     {
@@ -52,7 +83,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
             return 0;
         }
 
-        return DeleteRecordings(referenced, time.GetUtcNow() - OrphanGrace).Deleted;
+        return DeleteRecordings(referenced, time.GetUtcNow() - OrphanGrace, keepUnfinished: true).Deleted;
     }
 
     /// <summary>
@@ -80,8 +111,8 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
             }
         }
 
-        var rest = DeleteRecordings(new HashSet<string>(StringComparer.OrdinalIgnoreCase), time.GetUtcNow() - ActiveRecordingGrace);
-        var (logsRemoved, logsKept) = ClearLogs();
+        var rest = DeleteRecordings(new HashSet<string>(StringComparer.OrdinalIgnoreCase), time.GetUtcNow() - ActiveRecordingGrace, keepUnfinished: false);
+        var (logsRemoved, logsKept) = logFiles is null ? ClearLogs() : logFiles.WhileClosed(ClearLogs);
         logger.LogInformation("Delete all: {Removed} recordings removed, {Kept} kept, {Logs} log files cleared, {LogsKept} not", removed + rest.Deleted, kept + rest.Kept, logsRemoved, logsKept);
         return new DeleteAllResult(removed + rest.Deleted, kept + rest.Kept, logsRemoved, logsKept);
     }
@@ -164,7 +195,29 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
 
     private static string FullPath(string path) => Path.GetFullPath(path);
 
-    private (int Deleted, int Kept) DeleteRecordings(HashSet<string> referenced, DateTimeOffset olderThan)
+    private int DeleteFiles(IEnumerable<string> files)
+    {
+        var count = 0;
+        foreach (var file in files)
+        {
+            try
+            {
+                if (File.Exists(file))
+                {
+                    File.Delete(file);
+                    count++;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogDebug(ex, "Could not delete {File}", Path.GetFileName(file));
+            }
+        }
+
+        return count;
+    }
+
+    private (int Deleted, int Kept) DeleteRecordings(HashSet<string> referenced, DateTimeOffset olderThan, bool keepUnfinished)
     {
         if (!Directory.Exists(paths.AudioDirectory))
         {
@@ -184,6 +237,10 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
             try
             {
                 written = File.GetLastWriteTimeUtc(file);
+                if (keepUnfinished && WavHeader.IsUnfinished(file))
+                {
+                    continue;
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -229,8 +286,9 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     }
 
     /// <summary>
-    /// Deletes every log file. The file the logger has open today cannot be deleted, so it is emptied instead (the
-    /// logger appends at the end of the file, wherever that is).
+    /// Deletes every log file; the app closes the one its logger has open while this runs (<see cref="ILogFileControl"/>).
+    /// A file that cannot be deleted is kept and counted, never emptied: emptying a file a logger has open in append mode
+    /// makes that logger fail at every later write.
     /// </summary>
     private (int Cleared, int Kept) ClearLogs()
     {
@@ -250,17 +308,8 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                try
-                {
-                    using var stream = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
-                    stream.SetLength(0);
-                    cleared++;
-                }
-                catch (Exception truncateEx) when (truncateEx is IOException or UnauthorizedAccessException)
-                {
-                    logger.LogDebug(truncateEx, "Could not clear log {File} ({First})", Path.GetFileName(file), ex.Message);
-                    kept++;
-                }
+                logger.LogDebug(ex, "Could not delete log {File}", Path.GetFileName(file));
+                kept++;
             }
         }
 
@@ -275,8 +324,12 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     }
 }
 
+/// <param name="Recovered">Interrupted recordings listed in History for Retry.</param>
+/// <param name="RemovedFiles">Recordings deleted by the retention settings and the orphan sweep.</param>
+public sealed record RetentionPass(int Recovered, int RemovedFiles);
+
 /// <param name="RecordingsRemoved">Recordings deleted, referenced by History or not.</param>
 /// <param name="RecordingsKept">Recordings in use (a dictation in progress, a file Windows would not release).</param>
-/// <param name="LogsCleared">Log files deleted or emptied.</param>
-/// <param name="LogsKept">Log files that could be neither deleted nor emptied.</param>
+/// <param name="LogsCleared">Log files deleted.</param>
+/// <param name="LogsKept">Log files that could not be deleted.</param>
 public sealed record DeleteAllResult(int RecordingsRemoved, int RecordingsKept, int LogsCleared, int LogsKept);
