@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using DictationApp.Core.Abstractions;
 using DictationApp.Core.Cleanup;
 using DictationApp.Core.History;
@@ -194,6 +195,43 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         Assert.True(_transcriber.ShutdownCalled);
         Assert.False(_transcriber.Aborted);
+    }
+
+    [Fact]
+    public async Task A_tap_being_cancelled_publishes_nothing_once_a_new_press_has_replaced_it()
+    {
+        // The hotkey service reads the status stream: the replaced session's level updates and closing Idle must not look
+        // like the new dictation answering its press and then ending, or the new press's tap would be dropped and it
+        // would record on with nothing able to stop it.
+        using var lookup = new ManualResetEventSlim();
+        var lookups = 0;
+        _foreground.OnCapture = () =>
+        {
+            if (Interlocked.Increment(ref lookups) == 1)
+            {
+                lookup.Wait(TimeSpan.FromSeconds(5)); // the tap's session starts slowly
+            }
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        await WaitFor(() => _hub.Current.StartedAt is not null, "the tap's dictation published");
+        var tapStartedAt = _hub.Current.StartedAt;
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        _hotkey.PressChord();
+        await Task.Delay(50);
+
+        var seen = new ConcurrentQueue<DictationStatus>();
+        _hub.Changed += seen.Enqueue;
+        _capture.Emit(1); // the tap's microphone is still running
+        lookup.Set();
+        await WaitFor(() => seen.Any(s => s.State == DictationState.Arming && s.StartedAt is { } at && at != tapStartedAt), "the new dictation answered");
+
+        Assert.DoesNotContain(seen, s => s.State == DictationState.Idle);
+        Assert.DoesNotContain(seen, s => s.StartedAt == tapStartedAt);
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        await WaitForIdleSession();
     }
 
     [Fact]
