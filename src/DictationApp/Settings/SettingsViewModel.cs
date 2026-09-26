@@ -25,6 +25,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly IHistoryRepository _history;
     private readonly Shell _shell;
     private readonly ILogger<SettingsViewModel> _logger;
+    private readonly SettingsEditTracker _edits = new();
     private IAudioCapture? _micTest;
 
     // General
@@ -97,6 +98,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         Microphones = new ObservableCollection<AudioDeviceInfo>(AudioDeviceEnumerator.ListCaptureDevices());
         Microphones.Insert(0, new AudioDeviceInfo(string.Empty, "Default communications device", false));
         Load(store.Current);
+        _store.Changed += OnStoreChanged;
     }
 
     public event Action? RequestClose;
@@ -156,7 +158,44 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             AppRules.Add(r.Clone());
         }
+
+        _edits.Reset(s, Dictionary, AppRules);
     }
+
+    /// <summary>Stops following changes made elsewhere; called when the window closes.</summary>
+    public void Detach() => _store.Changed -= OnStoreChanged;
+
+    /// <summary>
+    /// Settings changed elsewhere while the window is open: "Correct last dictation" added terms, a remembered tone or
+    /// level changed the defaults, a dictation updated use counts. The window shows new terms, and new defaults where the
+    /// user has not changed them here, so it does not look as if a correction failed. Save merges either way.
+    /// </summary>
+    private void OnStoreChanged(AppSettings latest) => Application.Current?.Dispatcher.BeginInvoke(() =>
+    {
+        foreach (var term in latest.Dictionary)
+        {
+            if (Dictionary.Any(t => string.Equals(t.Term.Trim(), term.Term.Trim(), StringComparison.OrdinalIgnoreCase)) || _edits.RemovedHere(term.Term, Dictionary))
+            {
+                continue;
+            }
+
+            var copy = term.Clone();
+            Dictionary.Insert(0, copy);
+            _edits.Track(copy);
+        }
+
+        if (DefaultTone == _edits.Tone)
+        {
+            DefaultTone = latest.DefaultTone;
+        }
+
+        if (DefaultCleanupLevel == _edits.Level)
+        {
+            DefaultCleanupLevel = latest.DefaultCleanupLevel;
+        }
+
+        _edits.TrackStyle(latest.DefaultTone, latest.DefaultCleanupLevel);
+    });
 
     [RelayCommand]
     private async Task SaveAsync()
@@ -172,6 +211,10 @@ public sealed partial class SettingsViewModel : ObservableObject
         var key = ApiKey.Trim();
         var groqKey = GroqApiKey.Trim();
         var gitHubToken = GitHubToken.Trim();
+
+        // Only what was changed here is merged into the latest settings: terms added by a correction, a remembered
+        // style change or updated use counts, made while this window was open, are kept.
+        var edits = _edits.Diff(DefaultTone, DefaultCleanupLevel, chord.ToString(), Dictionary.ToList(), AppRules.ToList());
         try
         {
             await _store.UpdateAsync(s =>
@@ -200,18 +243,14 @@ public sealed partial class SettingsViewModel : ObservableObject
                 s.LlmBaseUrl = string.IsNullOrWhiteSpace(LlmBaseUrl) ? AppSettings.DefaultLlmBaseUrl : LlmBaseUrl.Trim();
                 s.LlmModel = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
                 s.LlmFallbackModels = LlmFallbackModels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-                s.Hotkey = chord.ToString();
                 s.AcceptInjectedKeys = AcceptInjectedKeys;
                 s.MicrophoneDeviceId = string.IsNullOrEmpty(SelectedMicrophoneId) ? null : SelectedMicrophoneId;
-                s.DefaultTone = DefaultTone;
-                s.DefaultCleanupLevel = DefaultCleanupLevel;
                 s.RememberStyleChanges = RememberStyleChanges;
                 s.StoreAudio = StoreAudio;
                 s.KeepMicrophoneReady = KeepMicrophoneReady;
                 s.HistoryRetention = HistoryRetention;
                 s.AudioRetention = AudioRetention;
-                s.Dictionary = Dictionary.Where(t => !string.IsNullOrWhiteSpace(t.Term)).Select(t => t.Clone()).ToList();
-                s.AppRules = AppRules.Where(r => !string.IsNullOrWhiteSpace(r.ProcessGlob) || !string.IsNullOrWhiteSpace(r.UrlHost)).Select(r => r.Clone()).ToList();
+                edits.ApplyTo(s); // default tone and level, hotkey, dictionary terms and app rules
             });
 
             try
