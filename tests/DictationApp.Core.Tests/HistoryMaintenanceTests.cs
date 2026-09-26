@@ -151,15 +151,17 @@ public sealed class HistoryMaintenanceTests : IDisposable
             result = await _maintenance.DeleteAllAsync(CancellationToken.None);
         }
 
+        // Only Windows refuses to delete a file another handle has open; on Linux (the CI's Core job) it goes too.
+        var lockHolds = OperatingSystem.IsWindows();
         Assert.Empty(await _repo.SearchAsync(null));
         Assert.False(File.Exists(referenced));
         Assert.False(File.Exists(orphan));
         Assert.True(File.Exists(recording));
-        Assert.True(File.Exists(locked));
+        Assert.Equal(lockHolds, File.Exists(locked));
         Assert.False(File.Exists(oldLog));
         Assert.False(File.Exists(todayLog));
         Assert.Equal(1, _logFiles.Closes);
-        Assert.Equal(new DeleteAllResult(RecordingsRemoved: 2, RecordingsKept: 2, LogsCleared: 2, LogsKept: 0), result);
+        Assert.Equal(new DeleteAllResult(RecordingsRemoved: lockHolds ? 2 : 3, RecordingsKept: lockHolds ? 2 : 1, LogsCleared: 2, LogsKept: 0), result);
     }
 
     [Fact]
