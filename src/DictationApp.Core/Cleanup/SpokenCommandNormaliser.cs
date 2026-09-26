@@ -37,6 +37,7 @@ public static partial class SpokenCommandNormaliser
     /// Drops what each "scratch that" retracts: the clause before it, back to the previous sentence boundary or line
     /// start. When the transcriber already ended that clause with a full stop ("Send it to Bob. Scratch that."), that
     /// sentence is the one retracted, so the search starts before its own terminator; otherwise nothing was dropped.
+    /// Right after "new line" or "new paragraph" the line break is the last thing said, so only it is retracted.
     /// </summary>
     private static string ResolveScratches(string input)
     {
@@ -44,15 +45,23 @@ public static partial class SpokenCommandNormaliser
         while (s.Contains(ScratchMarker, StringComparison.Ordinal))
         {
             var idx = s.IndexOf(ScratchMarker, StringComparison.Ordinal);
-            var before = s[..idx].TrimEnd();
+            var before = s[..idx].TrimEnd(' ', '\t');
             var after = s[(idx + ScratchMarker.Length)..];
-            if (before.Length > 0 && before[^1] is '.' or '?' or '!')
+            if (before.EndsWith('\n'))
             {
-                before = before[..^1];
+                before = before.TrimEnd('\n', ' ', '\t');
+            }
+            else
+            {
+                if (before.Length > 0 && before[^1] is '.' or '?' or '!')
+                {
+                    before = before[..^1];
+                }
+
+                var cut = Math.Max(Math.Max(before.LastIndexOf('.'), before.LastIndexOf('?')), Math.Max(before.LastIndexOf('!'), before.LastIndexOf('\n')));
+                before = cut >= 0 ? before[..(cut + 1)] : string.Empty;
             }
 
-            var cut = Math.Max(Math.Max(before.LastIndexOf('.'), before.LastIndexOf('?')), Math.Max(before.LastIndexOf('!'), before.LastIndexOf('\n')));
-            before = cut >= 0 ? before[..(cut + 1)] : string.Empty;
             s = before.TrimEnd() + (after.Length > 0 ? " " + after.TrimStart() : string.Empty);
         }
 

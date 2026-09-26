@@ -25,6 +25,17 @@ public class SpokenCommandNormaliserTests
     }
 
     [Fact]
+    public void Scratch_that_after_a_new_line_retracts_only_the_line_break()
+    {
+        // The line break is the last thing said, so it is what "scratch that" takes back; the sentence before it stays.
+        Assert.Equal("Thanks", SpokenCommandNormaliser.Normalise("Thanks new line scratch that"));
+        Assert.Equal("Dear Sam see you", SpokenCommandNormaliser.Normalise("Dear Sam new paragraph scratch that see you"));
+
+        // The full stop said before "new paragraph" went with the line break, but the sentence itself stays.
+        Assert.Equal("Dear Sam See you.", SpokenCommandNormaliser.Normalise("Dear Sam. New paragraph. Scratch that. See you."));
+    }
+
+    [Fact]
     public void Scratch_that_after_a_full_stop_drops_the_sentence_it_follows()
     {
         // The transcriber often ends the retracted sentence with a full stop; that sentence is the one retracted.
