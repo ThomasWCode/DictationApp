@@ -103,8 +103,6 @@ public sealed class TrayIcon : IDisposable
 
     private Shell Shell => _services.GetRequiredService<Shell>();
 
-    private DictationOrchestrator Orchestrator => _services.GetRequiredService<DictationOrchestrator>();
-
     private ContextMenu BuildMenu()
     {
         var menu = new ContextMenu();
@@ -151,15 +149,20 @@ public sealed class TrayIcon : IDisposable
         return menu;
     }
 
+    /// <summary>
+    /// A dictation started here runs hands-free, like a double-tap one: Escape discards it while it records (as the Flow
+    /// bar says) and a press of the chord stops it, as does "Stop dictation".
+    /// </summary>
     private void ToggleDictation()
     {
+        var hotkeys = _services.GetRequiredService<HotkeyService>();
         if (_dictating)
         {
-            Orchestrator.SimulateChordUp();
+            hotkeys.StopHandsFree();
         }
         else
         {
-            Orchestrator.SimulateChordDown();
+            hotkeys.StartHandsFree();
         }
     }
 

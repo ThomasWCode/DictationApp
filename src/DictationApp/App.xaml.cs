@@ -89,7 +89,12 @@ public partial class App : Application
         }
     }
 
-    protected override async void OnExit(ExitEventArgs e)
+    /// <summary>
+    /// Waits for the host to stop before the process ends. An async OnExit returned to WPF at its first await, and the
+    /// process could exit before the hosted services had stopped, so a dictation running at Quit or sign-out was lost
+    /// instead of being kept for Retry. The wait runs on the thread pool (no UI-thread continuations) and is bounded.
+    /// </summary>
+    protected override void OnExit(ExitEventArgs e)
     {
         try
         {
@@ -97,8 +102,12 @@ public partial class App : Application
             {
                 _host.Services.GetService<TrayIcon>()?.Dispose();
                 _host.Services.GetService<UpdateCheckService>()?.ApplyPendingOnExit();
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-                await _host.StopAsync(cts.Token);
+                var host = _host;
+                Task.Run(async () =>
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+                    await host.StopAsync(cts.Token).ConfigureAwait(false);
+                }).Wait(TimeSpan.FromSeconds(5));
                 _host.Dispose();
             }
         }
@@ -108,7 +117,7 @@ public partial class App : Application
         }
         finally
         {
-            await Log.CloseAndFlushAsync();
+            Log.CloseAndFlush();
             base.OnExit(e);
         }
     }
