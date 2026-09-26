@@ -91,6 +91,36 @@ public class LlmPostProcessorTests
     }
 
     [Fact]
+    public async Task Output_is_validated_after_pause_markers_are_removed()
+    {
+        // A banned prefix hidden behind a marker, then replies that are nothing but markers: all fall back.
+        var (p, _, _) = Create((_, n, _) => Task.FromResult(Ok(n == 1 ? "[pause] Sure! Here is your text." : "[pause] [pause] [pause] [pause] [pause] [pause] [pause] [pause]")), fallbacks: ["b", "c"]);
+        var request = Request with { PauseMarkedTranscript = "Typing into the box [pause] still adds a space." };
+
+        var result = await p.ProcessAsync("Typing into the box. Still adds a space.", request, CancellationToken.None);
+
+        Assert.False(result.Applied);
+        Assert.Equal("Typing into the box. Still adds a space.", result.Text);
+    }
+
+    [Fact]
+    public async Task Literal_pause_markers_in_the_speakers_words_are_kept()
+    {
+        var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Type [pause] where the recording stops.")));
+
+        // One turn: nothing was joined, so the marked text equals the transcript and the words are left alone.
+        var single = Request with { PauseMarkedTranscript = "Type [pause] where the recording stops." };
+        var result = await p.ProcessAsync("Type [pause] where the recording stops.", single, CancellationToken.None);
+        Assert.Equal("Type [pause] where the recording stops.", result.Text);
+        Assert.DoesNotContain("marks where the speaker stopped", handler.Calls[0].Body);
+
+        // Several turns, but the speaker said the marker: no markers are used at all.
+        var joined = Request with { PauseMarkedTranscript = "Type [pause] here [pause] then stop." };
+        await p.ProcessAsync("Type [pause] here. Then stop.", joined, CancellationToken.None);
+        Assert.DoesNotContain("marks where the speaker stopped", handler.Calls[1].Body);
+    }
+
+    [Fact]
     public async Task Level_none_keeps_the_transcript_punctuation()
     {
         var (p, handler, _) = Create((_, _, _) => Task.FromResult(Ok("Typing into the box. Still adds a space.")));

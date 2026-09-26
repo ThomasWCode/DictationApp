@@ -83,7 +83,7 @@ public sealed class TranscriptAssembler
                 text = LowerFirstWord(text);
             }
 
-            if (i < parts.Count - 1 && text.EndsWith('.') && !text.EndsWith("..", StringComparison.Ordinal))
+            if (i < parts.Count - 1 && EndsWithFullStop(text))
             {
                 text = text[..^1];
             }
@@ -94,16 +94,21 @@ public sealed class TranscriptAssembler
         return sb.ToString();
     }
 
+    /// <summary>Sentence-ending full stops, including CJK, Devanagari and Urdu ones; an ASCII ellipsis is kept.</summary>
+    private static readonly char[] FullStops = ['.', '\u3002', '\uFF61', '\u0964', '\u06D4'];
+
+    private static bool EndsWithFullStop(string text) =>
+        text.Length > 0 && FullStops.Contains(text[^1]) && !text.EndsWith("..", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Lower-cases the first word only when it is a plain capitalised word ("Still"): the whole word up to the next
+    /// space is judged, so "I", "U.S.", "R&amp;D", "C#", "WhatsApp" and "NASA" keep their case.
+    /// </summary>
     private static string LowerFirstWord(string text)
     {
-        var end = 0;
-        while (end < text.Length && (char.IsLetter(text[end]) || text[end] == '\''))
-        {
-            end++;
-        }
-
-        var word = text[..end];
-        if (word.Length == 0 || !char.IsUpper(word[0]) || word == "I" || word.StartsWith("I'", StringComparison.Ordinal) || word.Skip(1).Any(char.IsUpper))
+        var word = text.Split(' ', 2)[0].TrimEnd(',', ';', ':', '.', '!', '?');
+        if (word.Length == 0 || !char.IsUpper(word[0]) || word == "I" || word.StartsWith("I'", StringComparison.Ordinal) ||
+            !word.All(c => char.IsLetter(c) || c == '\'') || word.Skip(1).Any(char.IsUpper))
         {
             return text;
         }

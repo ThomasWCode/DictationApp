@@ -38,6 +38,13 @@ public class TranscriptAssemblerTests
     [InlineData("Wait...|No.", "Wait... [pause] no.")] // an ellipsis is kept
     [InlineData("One turn only.", "One turn only.")]
     [InlineData("First.||Second.", "First [pause] second.")] // empty turns are skipped
+    [InlineData("Made in the.|U.S. mostly.", "Made in the [pause] U.S. mostly.")] // punctuated initialisms stay
+    [InlineData("We spent it on.|R&D, mostly.", "We spent it on [pause] R&D, mostly.")]
+    [InlineData("Written in.|C# today.", "Written in [pause] C# today.")]
+    [InlineData("Still,|we tried.", "Still, [pause] we tried.")]
+    [InlineData("Then.|Still, it failed.", "Then [pause] still, it failed.")] // trailing punctuation does not protect a word
+    [InlineData("\u7B2C\u4E00\u90E8\u5206\u3002|\u7B2C\u4E8C\u90E8\u5206\u3002", "\u7B2C\u4E00\u90E8\u5206 [pause] \u7B2C\u4E8C\u90E8\u5206\u3002")] // CJK full stop
+    [InlineData("\u4F60\u597D\uFF1F|\u597D\u3002", "\u4F60\u597D\uFF1F [pause] \u597D\u3002")] // CJK question mark stays
     public void Join_at_pauses(string turns, string expected)
     {
         Assert.Equal(expected, TranscriptAssembler.JoinAtPauses(turns.Split('|')));
