@@ -1,10 +1,16 @@
 name: CI
 
+# Feature branches are built by their pull request only: also triggering on pushes to claude/** ran every PR
+# push twice. A newer push to the same pull request cancels the run it supersedes.
 on:
   push:
-    branches: ["main", "claude/**"]
+    branches: ["main"]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   DOTNET_NOLOGO: true
