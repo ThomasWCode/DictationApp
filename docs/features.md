@@ -72,8 +72,9 @@ unavailable) handles the unambiguous forms itself: "1." / "1)" / "1:" markers an
 "and" / "then" before the next item is dropped. "Version 1.2" and "my number one priority" stay as prose.
 
 Safety net: each model gets 4 s and the whole chain 8 s. The default chain is `openai/gpt-oss-120b` →
-`qwen/qwen3.8-27b` → `openai/gpt-oss-20b`, all on Groq's free tier (about 1000 requests per day and 8000
-tokens per minute per model; a 429 rate limit simply moves to the next model). The gpt-oss models are asked
+`qwen/qwen3.8-27b` → `openai/gpt-oss-20b`, all on Groq's free tier (per model: 30 requests a minute, 1,000 a day,
+8,000 tokens a minute and 200,000 tokens a day; every cleanup sends the whole system prompt, so a heavy day can
+reach a model's daily token cap. A 429 rate limit simply moves to the next model, each with its own caps). The gpt-oss models are asked
 for low reasoning effort so they answer in under a second instead of thinking through their token budget. Output is rejected if the model did not finish it (it ran out of tokens or was filtered), if it is empty, starts
 with "Here is"/"Sure"/similar, or is more than 2.5× / less than 0.4× the input length; the next model is then tried.
 A model the key may not use (403) or an unknown model also moves on; only a rejected key (401) stops the chain. On
