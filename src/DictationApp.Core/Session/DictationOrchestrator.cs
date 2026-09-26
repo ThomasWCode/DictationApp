@@ -57,6 +57,7 @@ public sealed class DictationOrchestrator : BackgroundService
     private readonly DictationStateMachine _machine;
     private readonly Channel<ControlEvent> _events = Channel.CreateUnbounded<ControlEvent>(new UnboundedChannelOptions { SingleReader = true });
     private readonly SemaphoreSlim _replayGate = new(1, 1);
+    private readonly HashSet<string> _reportedCleanupProblems = [];
     private DictationSession? _session;
     private Task? _sessionTask;
 
@@ -152,6 +153,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
             var request = new PostProcessRequest(record.Level, record.Tone, KeytermsSelector.Select(settings.Dictionary), record.ProcessName ?? string.Empty, record.Url, null, PauseMarkedTranscript: transcript.PauseMarkedText);
             var result = await _postProcessor.ProcessAsync(transcript.Text, request, ct).ConfigureAwait(false);
+            ReportCleanupProblem(result);
             await _clipboard.SetTextAsync(result.Text, ct).ConfigureAwait(false);
             record.RawTranscript = transcript.Text;
             record.CleanedText = result.Applied ? result.Text : string.Empty;
@@ -676,6 +678,7 @@ public sealed class DictationOrchestrator : BackgroundService
             var request = new PostProcessRequest(session.Level, session.Tone, keyterms, session.Context.ProcessName, session.Context.Url, session.Rule.Hint, PauseMarkedTranscript: session.Assembler.PauseMarkedText);
             var result = await _postProcessor.ProcessAsync(rawText, request, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
+            ReportCleanupProblem(result);
             record.CleanedText = result.Applied ? result.Text : string.Empty;
             record.LlmModel = result.Model;
             record.FailureReason = result.Applied ? null : result.FailureReason;
@@ -727,7 +730,7 @@ public sealed class DictationOrchestrator : BackgroundService
                     break;
                 default:
                     record.Status = RecordStatus.Failed;
-                    record.FailureReason = insertion.Reason;
+                    record.FailureReason = AppendReason(record.FailureReason, insertion.Reason);
                     await _clipboard.SetTextAsync(text, CancellationToken.None).ConfigureAwait(false);
                     _notifier.Toast("Could not insert", (insertion.Reason ?? "Unknown error") + ". Text copied to the clipboard.", ToastKind.Warning);
                     _machine.Fire(DictationTrigger.Failed);
@@ -917,6 +920,33 @@ public sealed class DictationOrchestrator : BackgroundService
         }
 
         PublishIdle("Failed");
+    }
+
+    /// <summary>A failure reason added after another (cleanup, then insertion) is appended, never overwrites it.</summary>
+    private static string? AppendReason(string? existing, string? added) =>
+        string.IsNullOrEmpty(existing) ? added : string.IsNullOrEmpty(added) ? existing : existing + "; " + added;
+
+    /// <summary>
+    /// A cleanup settings problem that will recur (rejected key, a model the key may not use, a retired model) is shown
+    /// once per app run, even when a fallback model covered for it: otherwise the preferred model could silently stop
+    /// being used, and with the Minimal Flow bar a rejected key would show nothing at all.
+    /// </summary>
+    private void ReportCleanupProblem(PostProcessResult result)
+    {
+        if (result.ConfigurationProblem is not { } problem)
+        {
+            return;
+        }
+
+        lock (_reportedCleanupProblems)
+        {
+            if (!_reportedCleanupProblems.Add(problem))
+            {
+                return;
+            }
+        }
+
+        _notifier.Toast(result.Applied ? "Cleanup model problem" : "Cleanup skipped", problem, ToastKind.Warning);
     }
 
     private async Task SaveRecordAsync(DictationRecord record)

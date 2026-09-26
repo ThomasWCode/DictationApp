@@ -25,6 +25,16 @@ public class SpokenCommandNormaliserTests
     }
 
     [Fact]
+    public void Scratch_that_after_a_full_stop_drops_the_sentence_it_follows()
+    {
+        // The transcriber often ends the retracted sentence with a full stop; that sentence is the one retracted.
+        Assert.Equal("Send it to Alice.", SpokenCommandNormaliser.Normalise("Send it to Bob. Scratch that. Send it to Alice."));
+        Assert.Equal("First point. Third point.", SpokenCommandNormaliser.Normalise("First point. Second point. Scratch that. Third point."));
+        Assert.Equal("Hello there. Send it to Alice.", SpokenCommandNormaliser.Normalise("Hello there. Send it to Bob, scratch that, send it to Alice."));
+        Assert.Equal("Start from SCRATCH today.", SpokenCommandNormaliser.Normalise("Start from SCRATCH today."));
+    }
+
+    [Fact]
     public void Commands_are_case_insensitive_and_whole_words()
     {
         Assert.Equal("A periodic table", SpokenCommandNormaliser.Normalise("a periodic table"));

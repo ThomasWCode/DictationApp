@@ -10,13 +10,18 @@ public sealed record PostProcessRequest(
     string? ModelOverride = null,
     string? PauseMarkedTranscript = null);
 
+/// <param name="ConfigurationProblem">
+/// A settings problem that will recur on every dictation (rejected key, a model the key may not use, an unknown or
+/// retired model), set even when a fallback model covered for it, so the user can be told once.
+/// </param>
 public sealed record PostProcessResult(
     string Text,
     bool Applied,
     string? Model,
     string? FailureReason,
     int? PromptTokens = null,
-    int? CompletionTokens = null)
+    int? CompletionTokens = null,
+    string? ConfigurationProblem = null)
 {
     public static PostProcessResult Passthrough(string text) => new(text, false, null, null);
 }

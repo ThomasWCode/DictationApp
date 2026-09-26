@@ -9,6 +9,9 @@ namespace DictationApp.Core.Cleanup;
 /// </summary>
 public static partial class SpokenCommandNormaliser
 {
+    // A private-use character cannot collide with dictated text, unlike a word marker ("start from SCRATCH").
+    private const string ScratchMarker = "\uE000";
+
     public static string Normalise(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -17,7 +20,7 @@ public static partial class SpokenCommandNormaliser
         }
 
         var s = text.Trim();
-        s = ScratchThat().Replace(s, static m => RemovePrecedingClause(m));
+        s = ScratchThat().Replace(s, ScratchMarker);
         s = NewParagraph().Replace(s, "\n\n");
         s = NewLine().Replace(s, "\n");
         s = BulletPoint().Replace(s, "\n- ");
@@ -26,14 +29,34 @@ public static partial class SpokenCommandNormaliser
         s = CollapseSpacesBeforePunctuation().Replace(s, "$1");
         s = SpaceAfterNewline().Replace(s, "\n");
         s = MultiSpace().Replace(s, " ");
-        s = CapitaliseAfterSentenceEnd(s);
+        s = CapitaliseAfterSentenceEnd(ResolveScratches(s));
         return s.Trim();
     }
 
-    private static string RemovePrecedingClause(Match m)
+    /// <summary>
+    /// Drops what each "scratch that" retracts: the clause before it, back to the previous sentence boundary or line
+    /// start. When the transcriber already ended that clause with a full stop ("Send it to Bob. Scratch that."), that
+    /// sentence is the one retracted, so the search starts before its own terminator; otherwise nothing was dropped.
+    /// </summary>
+    private static string ResolveScratches(string input)
     {
-        // "scratch that" is handled in a second pass because we need the surrounding text.
-        return "SCRATCH";
+        var s = input;
+        while (s.Contains(ScratchMarker, StringComparison.Ordinal))
+        {
+            var idx = s.IndexOf(ScratchMarker, StringComparison.Ordinal);
+            var before = s[..idx].TrimEnd();
+            var after = s[(idx + ScratchMarker.Length)..];
+            if (before.Length > 0 && before[^1] is '.' or '?' or '!')
+            {
+                before = before[..^1];
+            }
+
+            var cut = Math.Max(Math.Max(before.LastIndexOf('.'), before.LastIndexOf('?')), Math.Max(before.LastIndexOf('!'), before.LastIndexOf('\n')));
+            before = cut >= 0 ? before[..(cut + 1)] : string.Empty;
+            s = before.TrimEnd() + (after.Length > 0 ? " " + after.TrimStart() : string.Empty);
+        }
+
+        return s;
     }
 
     private static string PunctuationFor(string command) => command.ToLowerInvariant() switch
@@ -52,18 +75,6 @@ public static partial class SpokenCommandNormaliser
 
     private static string CapitaliseAfterSentenceEnd(string s)
     {
-        // Resolve scratch markers: drop text back to the previous sentence boundary or line start.
-        const string marker = "SCRATCH";
-        while (s.Contains(marker, StringComparison.Ordinal))
-        {
-            var idx = s.IndexOf(marker, StringComparison.Ordinal);
-            var before = s[..idx];
-            var after = s[(idx + marker.Length)..];
-            var cut = Math.Max(Math.Max(before.LastIndexOf('.'), before.LastIndexOf('?')), Math.Max(before.LastIndexOf('!'), before.LastIndexOf('\n')));
-            before = cut >= 0 ? before[..(cut + 1)] : string.Empty;
-            s = before.TrimEnd() + (after.Length > 0 ? " " + after.TrimStart() : string.Empty);
-        }
-
         var sb = new StringBuilder(s.Length);
         var capitalise = true;
         foreach (var ch in s)

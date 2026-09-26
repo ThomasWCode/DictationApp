@@ -480,6 +480,19 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         Assert.StartsWith(" Third.", _inserter.LastText);
     }
 
+    [Fact]
+    public async Task A_recurring_cleanup_problem_is_reported_once_per_run()
+    {
+        // Even when a fallback model covered for it: otherwise the preferred model could silently stop being used.
+        _post.Problem = "The Groq key may not use a.";
+        await StartAsync();
+        await DictateAsync("One.");
+        await DictateAsync("Two.");
+
+        Assert.Single(_notifier.Toasts, t => t.Message == "The Groq key may not use a.");
+        Assert.All(_history.Records, r => Assert.Null(r.FailureReason));
+    }
+
     private async Task DictateAsync(string text)
     {
         _hotkey.PressChord();
@@ -1086,6 +1099,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         /// <summary>When set, cleanup waits for it, holding the session in PostProcessing.</summary>
         public TaskCompletionSource? Gate { get; set; }
 
+        /// <summary>A recurring settings problem the cleanup reports (rejected key, blocked or retired model).</summary>
+        public string? Problem { get; set; }
+
         public PostProcessRequest? LastRequest { get; private set; }
 
         public async Task<PostProcessResult> ProcessAsync(string rawTranscript, PostProcessRequest request, CancellationToken ct)
@@ -1097,8 +1113,8 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             }
 
             return Fail
-                ? new PostProcessResult(rawTranscript, false, null, "gateway-down")
-                : new PostProcessResult(rawTranscript + " [cleaned]", true, "fake-model", null, 50, 10);
+                ? new PostProcessResult(rawTranscript, false, null, "gateway-down", ConfigurationProblem: Problem)
+                : new PostProcessResult(rawTranscript + " [cleaned]", true, "fake-model", null, 50, 10, Problem);
         }
     }
 
