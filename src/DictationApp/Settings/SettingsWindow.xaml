@@ -155,10 +155,10 @@
           </StackPanel>
           <TextBlock Text="Default cleanup level" Style="{StaticResource Heading}" Margin="0,18,0,8" />
           <RadioButton Content="None: spoken commands only, no AI call" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=None}" />
-          <RadioButton Content="Light: remove fillers and false starts, fix punctuation" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=Light}" />
-          <RadioButton Content="Medium: also fix grammar and split run-on sentences" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=Medium}" />
+          <RadioButton Content="Light: remove fillers and false starts, fix punctuation, rejoin sentences split by pauses" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=Light}" />
+          <RadioButton Content="Medium: also fix grammar and break up genuinely run-on sentences" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=Medium}" />
           <RadioButton Content="High: also tighten wording and add paragraphs" IsChecked="{Binding DefaultCleanupLevel, Converter={StaticResource EnumToBool}, ConverterParameter=High}" />
-          <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0" Text="App rules override these per application. None + Neutral never calls the LLM. If the LLM is unavailable the raw transcript is inserted and the Flow bar shows 'cleanup skipped'." />
+          <TextBlock Style="{StaticResource Hint}" Margin="0,10,0,0" Text="Light and above rejoin a sentence the transcriber cut in two where you paused to think (the AI is told where each pause was). App rules override these per application. None + Neutral never calls the LLM. If the LLM is unavailable the raw transcript is inserted and the Flow bar shows 'cleanup skipped'." />
           <TextBlock Text="Memory" Style="{StaticResource Heading}" Margin="0,18,0,8" />
           <CheckBox Content="Remember tone and cleanup changes made during a dictation (arrow keys or chips)" IsChecked="{Binding RememberStyleChanges}" />
           <TextBlock Style="{StaticResource Hint}" Text="A change made while an app rule applied updates that rule; otherwise it becomes the new default above. Untick to make changes apply to one dictation only." />
