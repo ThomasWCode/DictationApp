@@ -73,7 +73,7 @@ runs the whole pipeline with a WAV in place of the microphone and pastes into wh
 | Undo AI edit | Raw transcript copied; record marked | |
 | Retention 24 h / 14 d / forever | Old records and WAVs purged hourly and at startup | |
 | "Store audio" off | No WAV written; Play disabled | |
-| Delete all history (first copy an extra WAV into the audio folder, and play one in History) | Records, every WAV (the extra one too) and the log files gone; today's log emptied; status counts what was removed | |
+| Delete all history (first copy an extra WAV into the audio folder, and play one in History) | Records, every WAV (the extra one too) and the log files gone; a new log file for today appears at the next dictation and keeps growing; status counts what was removed | |
 | Correct last dictation from Settings › Dictionary, then Save Settings | The new starred terms are still there afterwards | |
 
 ## Network, privacy, install
