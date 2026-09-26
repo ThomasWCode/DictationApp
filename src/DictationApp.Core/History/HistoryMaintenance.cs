@@ -25,9 +25,10 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     /// Deletes recordings no History record refers to, once older than <see cref="OrphanGrace"/>. The referenced set
     /// comes from every record, not a page of the newest ones (with more than 5,000 records the audio of older ones was
     /// deleted). An empty History (a lost or recreated database) skips the sweep rather than treat every recording as
-    /// an orphan; "Delete all" empties the folder itself.
+    /// an orphan; "Delete all" empties the folder itself. <paramref name="historyWasEmpty"/> is that judgement made
+    /// before a retention pass deleted anything (checked now when null).
     /// </summary>
-    public async Task<int> SweepOrphansAsync(CancellationToken ct)
+    public async Task<int> SweepOrphansAsync(CancellationToken ct, bool? historyWasEmpty = null)
     {
         if (!Directory.Exists(paths.AudioDirectory))
         {
@@ -37,7 +38,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
         HashSet<string> referenced;
         try
         {
-            if ((await history.GetStatsAsync(ct).ConfigureAwait(false)).Count == 0)
+            if (historyWasEmpty ?? (await history.GetStatsAsync(ct).ConfigureAwait(false)).Count == 0)
             {
                 logger.LogDebug("History is empty; orphan sweep skipped");
                 return 0;
