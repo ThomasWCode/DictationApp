@@ -673,11 +673,10 @@ public sealed class DictationOrchestrator : BackgroundService
                 _logger.LogInformation("Trailing partial included in final text");
             }
 
-            if (sink is not null)
-            {
-                sink.Complete();
-                record.AudioPath = sink.Path;
-            }
+            // The recording is finished (Complete) only once its record is saved: until then its header keeps the
+            // "unfinished" marker, so a crash or kill during cleanup or insertion leaves a file the next start
+            // recovers into History instead of an orphan the sweep deletes.
+            record.AudioPath = sink?.Path;
 
             if (string.IsNullOrWhiteSpace(rawText))
             {
@@ -759,7 +758,11 @@ public sealed class DictationOrchestrator : BackgroundService
             }
 
             record.UpdatedAt = _time.GetUtcNow();
-            await SaveRecordAsync(record).ConfigureAwait(false);
+            if (await SaveRecordAsync(record).ConfigureAwait(false))
+            {
+                sink?.Complete();
+            }
+
             _ = BumpDictionaryUsageAsync(keyterms, rawText);
             PublishIdle(badge);
             _logger.LogInformation("Dictation {Status}: {Words} words, {Duration:0.0}s audio, llm={Model}", record.Status, CountWords(text), audioSeconds, result.Model ?? "none");
@@ -848,7 +851,6 @@ public sealed class DictationOrchestrator : BackgroundService
 
             if (sink is not null && sink.BytesWritten > 0)
             {
-                sink.Complete();
                 record.AudioPath = sink.Path;
             }
             else
@@ -863,9 +865,9 @@ public sealed class DictationOrchestrator : BackgroundService
             record.Level = session.Level;
             record.DurationMs = (int)session.AudioDuration.TotalMilliseconds;
             record.UpdatedAt = _time.GetUtcNow();
-            if (record.AudioPath is not null || !string.IsNullOrWhiteSpace(record.RawTranscript))
+            if ((record.AudioPath is not null || !string.IsNullOrWhiteSpace(record.RawTranscript)) && await SaveRecordAsync(record).ConfigureAwait(false) && record.AudioPath is not null)
             {
-                await SaveRecordAsync(record).ConfigureAwait(false);
+                sink?.Complete();
             }
         }
         catch (Exception ex)
@@ -891,8 +893,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
         if (sink is not null && sink.BytesWritten > 0)
         {
-            sink.Complete();
-            record.AudioPath = sink.Path;
+            record.AudioPath = sink.Path; // finished below once the record is saved
         }
         else
         {
@@ -924,22 +925,28 @@ public sealed class DictationOrchestrator : BackgroundService
         }
         else if (record.AudioPath is not null)
         {
-            await SaveRecordAsync(record).ConfigureAwait(false);
-            if (isNetwork)
+            if (await SaveRecordAsync(record).ConfigureAwait(false))
             {
-                _notifier.Toast("Network error", "Saved to history. Use Retry when you are back online.", ToastKind.Warning);
+                sink?.Complete();
+                _notifier.Toast(
+                    isNetwork ? "Network error" : "Dictation failed",
+                    isNetwork ? "Saved to History. Use Retry when you are back online." : error.Message + " The recording is saved in History.",
+                    ToastKind.Warning);
             }
             else
             {
-                _notifier.Toast("Dictation failed", error.Message + " The recording is saved in History.", ToastKind.Warning);
+                // Left unfinished on purpose: the next start recovers it into History for Retry.
+                _notifier.Toast("Dictation failed", error.Message + " History could not be written; the recording is kept and will be listed in History after a restart.", ToastKind.Warning);
             }
         }
         else if (!string.IsNullOrWhiteSpace(record.RawTranscript))
         {
             // No audio ("Store audio" off, or nothing recorded) but some words were heard: keep them in History,
             // where they can still be copied. Retry needs audio, so it stays unavailable for this record.
-            await SaveRecordAsync(record).ConfigureAwait(false);
-            _notifier.Toast("Dictation failed", error.Message + " What was heard so far is saved in History.", ToastKind.Warning);
+            _notifier.Toast(
+                "Dictation failed",
+                error.Message + (await SaveRecordAsync(record).ConfigureAwait(false) ? " What was heard so far is saved in History." : " History could not be written (see the log)."),
+                ToastKind.Warning);
         }
         else
         {
@@ -984,7 +991,8 @@ public sealed class DictationOrchestrator : BackgroundService
         _notifier.Toast(result.Applied ? "Cleanup model problem" : "Cleanup skipped", problem, ToastKind.Warning);
     }
 
-    private async Task SaveRecordAsync(DictationRecord record)
+    /// <summary>False when History could not be written (logged); callers then say so instead of "saved".</summary>
+    private async Task<bool> SaveRecordAsync(DictationRecord record)
     {
         try
         {
@@ -996,10 +1004,13 @@ public sealed class DictationOrchestrator : BackgroundService
             {
                 await _history.UpdateAsync(record, CancellationToken.None).ConfigureAwait(false);
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Could not write history record");
+            return false;
         }
     }
 

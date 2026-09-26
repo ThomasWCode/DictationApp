@@ -22,7 +22,8 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly ISecretStore _secrets;
     private readonly IHttpClientFactory _http;
     private readonly IAudioCaptureFactory _captures;
-    private readonly IHistoryRepository _history;
+    private readonly HistoryMaintenance _maintenance;
+    private readonly WavPlayer _player;
     private readonly Shell _shell;
     private readonly ILogger<SettingsViewModel> _logger;
     private readonly SettingsEditTracker _edits = new();
@@ -84,7 +85,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         ISecretStore secrets,
         IHttpClientFactory http,
         IAudioCaptureFactory captures,
-        IHistoryRepository history,
+        HistoryMaintenance maintenance,
+        WavPlayer player,
         Shell shell,
         ILogger<SettingsViewModel> logger)
     {
@@ -92,7 +94,8 @@ public sealed partial class SettingsViewModel : ObservableObject
         _secrets = secrets;
         _http = http;
         _captures = captures;
-        _history = history;
+        _maintenance = maintenance;
+        _player = player;
         _shell = shell;
         _logger = logger;
         Microphones = new ObservableCollection<AudioDeviceInfo>(AudioDeviceEnumerator.ListCaptureDevices());
@@ -504,37 +507,29 @@ public sealed partial class SettingsViewModel : ObservableObject
         AppRules.Clear();
     }
 
+    /// <summary>
+    /// Deletes everything History keeps: every record, every recording in the audio folder (including ones no record
+    /// refers to, left by a crash or a failed save) and the logs. A recording still being written is kept and counted.
+    /// </summary>
     [RelayCommand]
     private async Task DeleteAllHistoryAsync()
     {
-        if (MessageBox.Show("Delete every dictation and audio file? This cannot be undone.", "DictationApp", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        if (MessageBox.Show("Delete every dictation, every recording and the logs? This cannot be undone.", "DictationApp", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
         {
             return;
         }
 
         try
         {
-            var files = await _history.DeleteAllAsync();
-            var deleted = 0;
-            foreach (var f in files)
-            {
-                try
-                {
-                    if (System.IO.File.Exists(f))
-                    {
-                        System.IO.File.Delete(f);
-                        deleted++;
-                    }
-                }
-                catch (System.IO.IOException)
-                {
-                }
-            }
-
-            HistoryStatus = $"History cleared ({deleted} audio files removed).";
+            _player.Stop(); // a recording being played in History cannot be deleted
+            var result = await _maintenance.DeleteAllAsync(CancellationToken.None);
+            var kept = result.RecordingsKept + result.LogsKept;
+            HistoryStatus = $"History cleared: {result.RecordingsRemoved} recordings and {result.LogsCleared} log files removed."
+                + (kept > 0 ? $" {kept} files in use were kept." : string.Empty);
         }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Delete all history failed");
             HistoryStatus = "Could not clear history: " + ex.Message;
         }
     }

@@ -1,5 +1,6 @@
 using System.IO;
 using DictationApp.Core.Abstractions;
+using DictationApp.Core.History;
 using DictationApp.Windows.Audio;
 using DictationApp.Windows.Security;
 using NAudio.Wave;
@@ -69,6 +70,27 @@ public sealed class WavFileSinkTests : IDisposable
         Assert.False(File.Exists(path));
         sink.Write(new byte[100]); // no-op after close
         Assert.Equal(100, sink.BytesWritten);
+    }
+
+    [Fact]
+    public void A_recording_closed_without_complete_keeps_the_unfinished_marker_and_can_be_repaired()
+    {
+        // The session finishes a recording only after its History record is saved; a file left by a crash is
+        // recognised at the next start by the sizes that were never written, and recovered.
+        var path = Path.Combine(_dir, "interrupted.wav");
+        using (var sink = new WavFileSink(path))
+        {
+            sink.Write(new byte[WavHeader.BytesPerSecond / 2]);
+        }
+
+        Assert.True(WavHeader.TryRepairUnfinished(path, out var pcm));
+        Assert.Equal(WavHeader.BytesPerSecond / 2, pcm);
+        using (var reader = new WaveFileReader(path))
+        {
+            Assert.Equal(0.5, reader.TotalTime.TotalSeconds, 3);
+        }
+
+        Assert.False(WavHeader.TryRepairUnfinished(path, out _)); // finished now
     }
 }
 
