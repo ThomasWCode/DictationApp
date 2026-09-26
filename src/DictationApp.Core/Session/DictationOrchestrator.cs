@@ -486,7 +486,10 @@ public sealed class DictationOrchestrator : BackgroundService
                 sink?.Write(copy.Pcm16.Span);
                 session.Frames.Writer.TryWrite(copy);
                 session.OnFrame(copy);
-                _hub.Update(s => s with { Level = copy.Peak });
+                if (Publishes(session))
+                {
+                    _hub.Update(s => s with { Level = copy.Peak });
+                }
             };
             capture.Faulted += session.Fault;
             capture.Start();
@@ -500,7 +503,7 @@ public sealed class DictationOrchestrator : BackgroundService
             session.AttachTranscriber(transcriber);
             transcriber.TurnReceived += turn =>
             {
-                if (session.Assembler.Ingest(turn))
+                if (session.Assembler.Ingest(turn) && Publishes(session))
                 {
                     _hub.Update(s => s with { LiveText = session.Assembler.LiveText });
                 }
@@ -704,7 +707,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 sink?.Discard();
                 record.AudioPath = null;
                 _logger.LogInformation("Nothing heard (ms since the press: {Timings})", session.Timings());
-                PublishIdle("Nothing heard");
+                PublishIdle(session, "Nothing heard");
                 return;
             }
 
@@ -779,7 +782,7 @@ public sealed class DictationOrchestrator : BackgroundService
             }
 
             _ = BumpDictionaryUsageAsync(keyterms, rawText);
-            PublishIdle(badge);
+            PublishIdle(session, badge);
             _logger.LogInformation("Dictation {Status}: {Words} words, {Duration:0.0}s audio, llm={Model} (ms since the press: {Timings})", record.Status, CountWords(text), audioSeconds, result.Model ?? "none", session.Timings());
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -817,12 +820,13 @@ public sealed class DictationOrchestrator : BackgroundService
                 _machine.Fire(DictationTrigger.Failed);
             }
 
+            var publishes = Publishes(session);
             if (ReferenceEquals(_session, session))
             {
                 _session = null;
             }
 
-            if (_hub.Current.State != DictationState.Idle)
+            if (publishes && _hub.Current.State != DictationState.Idle)
             {
                 PublishIdle(null);
             }
@@ -844,7 +848,7 @@ public sealed class DictationOrchestrator : BackgroundService
             await transcriber.AbortAsync().ConfigureAwait(false);
         }
 
-        PublishIdle(badge);
+        PublishIdle(session, badge);
     }
 
     /// <summary>
@@ -968,7 +972,7 @@ public sealed class DictationOrchestrator : BackgroundService
             _notifier.Toast("Dictation failed", error.Message, ToastKind.Error);
         }
 
-        PublishIdle("Failed");
+        PublishIdle(session, "Failed");
     }
 
     /// <summary>
@@ -1212,8 +1216,31 @@ public sealed class DictationOrchestrator : BackgroundService
         }
     }
 
-    private void PublishSession(DictationSession session, DictationState state, string? badge) =>
-        _hub.Publish(new DictationStatus(state, session.Assembler.LiveText, session.LastPeak, session.Tone, session.Level, badge, session.StartedAt, session.Context.ProcessName, _hotkeys.Enabled));
+    /// <summary>
+    /// True while <paramref name="session"/> may publish status: it is the current session, or there is none (a
+    /// replacement gave up). A session a newer press has replaced (a tap still being cancelled) stays silent: the hotkey
+    /// service reads the status stream, and that session's level updates and closing Idle would otherwise look like the
+    /// new dictation answering its press and then ending, so the new press's tap was dropped and it recorded on with
+    /// nothing able to stop it.
+    /// </summary>
+    private bool Publishes(DictationSession session) => Volatile.Read(ref _session) is not { } current || ReferenceEquals(current, session);
+
+    private void PublishSession(DictationSession session, DictationState state, string? badge)
+    {
+        if (Publishes(session))
+        {
+            _hub.Publish(new DictationStatus(state, session.Assembler.LiveText, session.LastPeak, session.Tone, session.Level, badge, session.StartedAt, session.Context.ProcessName, _hotkeys.Enabled));
+        }
+    }
+
+    /// <summary>A session's closing Idle, unless a newer press has replaced it (see <see cref="Publishes"/>).</summary>
+    private void PublishIdle(DictationSession session, string? badge)
+    {
+        if (Publishes(session))
+        {
+            PublishIdle(badge);
+        }
+    }
 
     private void PublishIdle(string? badge)
     {
