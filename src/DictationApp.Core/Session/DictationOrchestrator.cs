@@ -25,6 +25,14 @@ public sealed class DictationOrchestrator : BackgroundService
     public static readonly TimeSpan SilentMicWarningAfter = TimeSpan.FromSeconds(2);
     public const string MicrophonePrivacyUri = "ms-settings:privacy-microphone";
 
+    /// <summary>
+    /// Replay pace for Retry: real time. AssemblyAI processes streamed audio at about 1.25x real time at most and then
+    /// ends the session with a short handshake, so the old 4x replay left the end of any recording longer than a few
+    /// seconds unprocessed and the retry came back silently cut off (and a recording over ~7 minutes could overflow
+    /// the server's 5-minute buffer). A retry therefore takes about as long as the recording.
+    /// </summary>
+    public const double RetryReplaySpeed = 1.0;
+
     /// <summary>Failure reason of a dictation that was still running when the app closed.</summary>
     public const string InterruptedReason = "Interrupted: DictationApp was closed during the dictation";
 
@@ -121,8 +129,10 @@ public sealed class DictationOrchestrator : BackgroundService
     public void SimulateDictationFromWav(string wavPath) => _events.Writer.TryWrite(new ControlEvent(ControlKind.SimulatedStart, WavPath: wavPath));
 
     /// <summary>
-    /// Re-streams a stored WAV through the transcriber (4× real time), cleans it up and copies the result to
-    /// the clipboard. Used by "Retry" in History for Failed/Pending records.
+    /// Re-streams a stored WAV through the transcriber (at <see cref="RetryReplaySpeed"/>), cleans it up and copies the
+    /// result to the clipboard. Used by "Retry" in History for Failed/Pending records. A retry whose streaming session
+    /// ended without its Termination summary may be missing its end, so it counts as failed: the record keeps its
+    /// earlier words and stays retryable.
     /// </summary>
     public async Task<bool> RetryAsync(long recordId, CancellationToken ct)
     {
@@ -142,7 +152,18 @@ public sealed class DictationOrchestrator : BackgroundService
         try
         {
             var settings = _settings.Current;
-            var transcript = await TranscribeWavAsync(record.AudioPath, 4.0, null, ct).ConfigureAwait(false);
+            var transcript = await TranscribeWavAsync(record.AudioPath, RetryReplaySpeed, null, ct).ConfigureAwait(false);
+            record.CostEstimate = (record.CostEstimate ?? 0m) + CostEstimator.SttCost(settings.SpeechModel, BilledDuration(transcript.Termination, transcript.WallClock));
+            record.UpdatedAt = _time.GetUtcNow();
+            if (transcript.Termination is null)
+            {
+                _logger.LogWarning("Retry of record {Id} ended without a Termination summary; keeping the earlier transcript", recordId);
+                record.FailureReason = "retry: the transcription did not finish";
+                await _history.UpdateAsync(record, ct).ConfigureAwait(false);
+                _notifier.Toast("Retry failed", "The transcription did not finish. The recording is kept; try Retry again.", ToastKind.Warning);
+                return false;
+            }
+
             if (string.IsNullOrWhiteSpace(transcript.Text))
             {
                 record.FailureReason = "retry: nothing heard";
@@ -162,7 +183,7 @@ public sealed class DictationOrchestrator : BackgroundService
             record.Status = RecordStatus.CopiedOnly;
             record.FailureReason = result.Applied ? null : result.FailureReason;
             record.UpdatedAt = _time.GetUtcNow();
-            record.CostEstimate = (record.CostEstimate ?? 0m) + CostEstimator.SttCost(settings.SpeechModel, transcript.AudioDuration) + CostEstimator.LlmCost(result.Model, result.PromptTokens, result.CompletionTokens);
+            record.CostEstimate += CostEstimator.LlmCost(result.Model, result.PromptTokens, result.CompletionTokens);
             await _history.UpdateAsync(record, ct).ConfigureAwait(false);
             _notifier.Toast("Retry complete", "Text copied to the clipboard.", ToastKind.Success);
             return true;
@@ -644,7 +665,7 @@ public sealed class DictationOrchestrator : BackgroundService
             }
             var audioSeconds = termination?.AudioDurationSeconds ?? session.AudioDuration.TotalSeconds;
             record.DurationMs = (int)(session.AudioDuration.TotalMilliseconds);
-            record.CostEstimate = CostEstimator.SttCost(settings.SpeechModel, TimeSpan.FromSeconds(audioSeconds));
+            record.CostEstimate = CostEstimator.SttCost(settings.SpeechModel, BilledDuration(termination, TimeSpan.FromSeconds(audioSeconds)));
             var rawText = session.Assembler.FinalText;
             record.RawTranscript = rawText;
             if (!session.Assembler.HasOpenTurn && session.Assembler.ClosedText != rawText)
@@ -881,6 +902,12 @@ public sealed class DictationOrchestrator : BackgroundService
         record.Status = RecordStatus.Failed;
         record.FailureReason = error.Message;
         record.RawTranscript = session.Assembler.FinalText;
+        if (transcriber?.ConnectLatency is not null)
+        {
+            // The streaming session was open and billed; no summary, so the audio sent is the best estimate.
+            record.CostEstimate ??= CostEstimator.SttCost(_settings.Current.SpeechModel, session.AudioDuration);
+        }
+
         record.Tone = session.Tone;
         record.Level = session.Level;
         record.DurationMs = (int)session.AudioDuration.TotalMilliseconds;
@@ -921,6 +948,14 @@ public sealed class DictationOrchestrator : BackgroundService
 
         PublishIdle("Failed");
     }
+
+    /// <summary>
+    /// What AssemblyAI bills: the time the streaming session was open, from its Termination summary; otherwise the
+    /// measured fallback. The audio length alone misses the connection and handshake time and, for a paced replay,
+    /// is not what was billed either.
+    /// </summary>
+    public static TimeSpan BilledDuration(TerminationMessage? termination, TimeSpan fallback) =>
+        termination is { SessionDurationSeconds: > 0 } t ? TimeSpan.FromSeconds(t.SessionDurationSeconds) : fallback;
 
     /// <summary>A failure reason added after another (cleanup, then insertion) is appended, never overwrites it.</summary>
     private static string? AppendReason(string? existing, string? added) =>

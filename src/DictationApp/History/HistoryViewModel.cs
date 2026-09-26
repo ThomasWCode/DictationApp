@@ -206,7 +206,10 @@ public sealed partial class HistoryViewModel : ObservableObject
         }
 
         IsBusy = true;
-        Status = "Re-streaming audio…";
+        var seconds = Math.Max(1, Selected.DurationMs / 1000);
+        Status = seconds >= 20
+            ? $"Re-streaming the recording; this takes about as long as it lasts ({seconds / 60} min {seconds % 60} s)…"
+            : "Re-streaming the recording…";
         try
         {
             var ok = await _orchestrator.RetryAsync(Selected.Id, CancellationToken.None);
