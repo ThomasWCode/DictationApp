@@ -24,7 +24,11 @@ public partial class SettingsWindow : Window
         LevelColumn.ItemsSource = Enum.GetValues<CleanupLevel>();
         PasteColumn.ItemsSource = Enum.GetValues<PasteMode>();
         viewModel.RequestClose += Close;
-        Closed += (_, _) => viewModel.StopMicTest();
+        Closed += (_, _) =>
+        {
+            viewModel.StopMicTest();
+            viewModel.Detach();
+        };
     }
 
     private void ApiKeyBox_OnPasswordChanged(object sender, RoutedEventArgs e) => _viewModel.ApiKey = ApiKeyBox.Password;
