@@ -483,6 +483,18 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task The_recording_is_finished_only_after_its_record_is_saved()
+    {
+        // Until then its header keeps the "unfinished" marker, so a crash during cleanup or insertion leaves a file the
+        // next start recovers into History instead of an orphan the sweep deletes.
+        _sinks.Probe = () => _history.Records.Count;
+        await StartAsync();
+        await DictateAsync("Saved first.");
+
+        Assert.Equal(1, _sinks.Last!.ProbeAtComplete);
+    }
+
+    [Fact]
     public async Task A_recurring_cleanup_problem_is_reported_once_per_run()
     {
         // Even when a fallback model covered for it: otherwise the preferred model could silently stop being used.
@@ -950,7 +962,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         }
     }
 
-    private sealed class MemorySink(string path) : IAudioSink
+    private sealed class MemorySink(string path, Func<int>? probe) : IAudioSink
     {
         public string Path { get; } = path;
 
@@ -960,9 +972,16 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public bool Discarded { get; private set; }
 
+        /// <summary>What the factory's probe said when the recording was finished (the number of saved records, say).</summary>
+        public int? ProbeAtComplete { get; private set; }
+
         public void Write(ReadOnlySpan<byte> pcm16) => BytesWritten += pcm16.Length;
 
-        public void Complete() => Completed = true;
+        public void Complete()
+        {
+            Completed = true;
+            ProbeAtComplete = probe?.Invoke();
+        }
 
         public void Discard() => Discarded = true;
 
@@ -975,7 +994,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public MemorySink? Last { get; private set; }
 
-        public IAudioSink Create(string path) => Last = new MemorySink(path);
+        public Func<int>? Probe { get; set; }
+
+        public IAudioSink Create(string path) => Last = new MemorySink(path, Probe);
     }
 
     private sealed class FakeTranscriber : IStreamingTranscriber
@@ -1221,5 +1242,8 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             Records.Clear();
             return Task.FromResult<IReadOnlyList<string>>([]);
         }
+
+        public Task<IReadOnlyList<string>> GetReferencedAudioPathsAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<string>>(Records.Where(r => r.AudioPath is not null).Select(r => r.AudioPath!).ToArray());
     }
 }
