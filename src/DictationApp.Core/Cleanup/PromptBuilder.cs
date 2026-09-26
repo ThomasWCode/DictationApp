@@ -35,8 +35,8 @@ public static class PromptBuilder
             if (ctx.PauseMarkers)
             {
                 sb.AppendLine("   \"[pause]\" marks where the speaker stopped for a second or more, often to think in mid-sentence.");
-                sb.AppendLine("   The punctuation and capital letter the transcriber put at each pause have been removed: decide");
-                sb.AppendLine("   afresh. When the words after [pause] continue the sentence, join them into it (\"typing into the");
+                sb.AppendLine("   The full stop and capital letter the transcriber put at each pause have been removed (question and");
+                sb.AppendLine("   exclamation marks are kept): decide afresh. When the words after [pause] continue the sentence, join them into it (\"typing into the");
                 sb.AppendLine("   search box [pause] still adds a space\" -> \"Typing into the search box still adds a space.\"); when a");
                 sb.AppendLine("   new sentence starts, end the previous one and capitalise (\"I sent the report [pause] then I called");
                 sb.AppendLine("   sam\" -> \"I sent the report. Then I called Sam.\"). Restore capitals on names. Never output [pause].");

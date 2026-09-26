@@ -109,8 +109,11 @@ public sealed class LlmPostProcessor : ITextPostProcessor
 
         // The model sees where the speaker paused, so it can rejoin a sentence the transcriber ended at a pause to think.
         // Not at None, which keeps the transcript's punctuation even when a tone runs the LLM.
+        // Marked only when turns were actually joined (the texts differ), and never when the speaker's own words contain
+        // the marker, which would otherwise be treated as a pause and removed.
         var input = request.Level != CleanupLevel.None && request.PauseMarkedTranscript is { } marked &&
-            marked.Contains(TranscriptAssembler.PauseMarker, StringComparison.Ordinal) ? marked : rawTranscript;
+            !string.Equals(marked, rawTranscript, StringComparison.Ordinal) &&
+            !rawTranscript.Contains(TranscriptAssembler.PauseMarker, StringComparison.OrdinalIgnoreCase) ? marked : rawTranscript;
         var pauseMarkers = !ReferenceEquals(input, rawTranscript);
         var systemPrompt = PromptBuilder.BuildSystemPrompt(new PromptContext(request.Level, request.Tone, request.Keyterms, request.AppName, request.Url, request.AppHint, pauseMarkers));
         var body = new ChatRequest
@@ -162,7 +165,8 @@ public sealed class LlmPostProcessor : ITextPostProcessor
 
                 var chat = await resp.Content.ReadFromJsonAsync<ChatResponse>(Json, attempt.Token).ConfigureAwait(false);
                 var content = chat?.Choices?.FirstOrDefault()?.Message?.Content;
-                var validation = OutputValidator.Validate(rawTranscript, content);
+                // Markers removed first, so the checks see exactly the text that would be inserted.
+                var validation = OutputValidator.Validate(rawTranscript, content is not null && pauseMarkers ? TranscriptAssembler.RemovePauseMarkers(content) : content);
                 if (!validation.IsValid)
                 {
                     lastReason = $"{model}:invalid-{validation.Reason}";
@@ -172,7 +176,7 @@ public sealed class LlmPostProcessor : ITextPostProcessor
                 }
 
                 _logger.LogInformation("LLM cleanup via {Model} in {Elapsed} ms (level={Level}, tone={Tone}, pauses={Pauses}, tokens={Prompt}+{Completion})", model, sw.ElapsedMilliseconds, request.Level, request.Tone, pauseMarkers, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
-                return new PostProcessResult(TranscriptAssembler.RemovePauseMarkers(validation.Text), true, model, null, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
+                return new PostProcessResult(validation.Text, true, model, null, chat?.Usage?.PromptTokens, chat?.Usage?.CompletionTokens);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
