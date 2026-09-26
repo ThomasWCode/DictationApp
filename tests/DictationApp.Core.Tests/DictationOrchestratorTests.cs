@@ -17,6 +17,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     private readonly FakeTimeProvider _clock = new(new DateTimeOffset(2026, 9, 22, 12, 0, 0, TimeSpan.Zero));
     private readonly FakeHotkey _hotkey = new();
     private readonly FakeCapture _capture = new();
+    private readonly FakeCaptureFactory _captures;
     private readonly FakeSinkFactory _sinks = new();
     private readonly FakeTranscriber _transcriber = new();
     private readonly FakeForeground _foreground = new();
@@ -32,10 +33,11 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     public DictationOrchestratorTests()
     {
         Directory.CreateDirectory(_dir);
+        _captures = new FakeCaptureFactory(_capture);
         _settings = new JsonSettingsStore(Path.Combine(_dir, "settings.json"), NullLogger<JsonSettingsStore>.Instance);
         _orchestrator = new DictationOrchestrator(
             _hotkey,
-            new FakeCaptureFactory(_capture),
+            _captures,
             _sinks,
             new FakeTranscriberFactory(_transcriber),
             _foreground,
@@ -802,6 +804,44 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         Assert.Equal(RecordStatus.CopiedOnly, record!.Status);
         Assert.Equal("Recovered text. [cleaned]", record.InsertedText);
         Assert.Equal("Recovered text. [cleaned]", _clipboard.Text);
+
+        // Paced at real time (AssemblyAI cannot keep up with a faster stream) and billed for the session, not the audio.
+        Assert.Equal(DictationOrchestrator.RetryReplaySpeed, _captures.LastReplaySpeed);
+        Assert.Equal(1.0, DictationOrchestrator.RetryReplaySpeed);
+        Assert.Equal(CostEstimator.SttCost(_settings.Current.SpeechModel, TimeSpan.FromSeconds(2)), record.CostEstimate);
+    }
+
+    [Fact]
+    public async Task Retry_that_ends_without_a_summary_keeps_the_earlier_words_and_stays_retryable()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, RawTranscript = "the earlier, longer words", CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        _transcriber.CompleteConnect();
+        _transcriber.OnConnected = () => _transcriber.RaiseTurn(0, "The earlier", endOfTurn: false);
+        _transcriber.NoTermination = true;
+        _capture.CompleteOnStart = true;
+
+        var ok = await _orchestrator.RetryAsync(id, CancellationToken.None);
+
+        Assert.False(ok);
+        var record = await _history.GetAsync(id);
+        Assert.Equal(RecordStatus.Failed, record!.Status);
+        Assert.Equal("the earlier, longer words", record.RawTranscript);
+        Assert.Contains("did not finish", record.FailureReason);
+        Assert.Null(_clipboard.Text);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Retry failed");
+    }
+
+    [Fact]
+    public async Task Cost_is_estimated_from_the_billed_session_not_the_audio_length()
+    {
+        await StartAsync();
+        await DictateAsync("Billed.");
+
+        // The fake session reports 1.5 s of audio in a 2 s session: AssemblyAI bills the session.
+        Assert.Equal(CostEstimator.SttCost(_settings.Current.SpeechModel, TimeSpan.FromSeconds(2)) + CostEstimator.LlmCost("fake-model", 50, 10), Assert.Single(_history.Records).CostEstimate);
     }
 
     // ---- fakes -------------------------------------------------------------------------------------
@@ -899,9 +939,15 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
     private sealed class FakeCaptureFactory(FakeCapture capture) : IAudioCaptureFactory
     {
+        public double? LastReplaySpeed { get; private set; }
+
         public IAudioCapture CreateMicrophone(string? deviceId) => capture;
 
-        public IAudioCapture CreateWavReplay(string wavPath, double speed) => capture;
+        public IAudioCapture CreateWavReplay(string wavPath, double speed)
+        {
+            LastReplaySpeed = speed;
+            return capture;
+        }
     }
 
     private sealed class MemorySink(string path) : IAudioSink
@@ -996,6 +1042,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         /// <summary>Raise a socket fault after the release, when the session no longer awaits it, and return no summary.</summary>
         public bool FaultBeforeShutdown { get; set; }
 
+        /// <summary>The handshake hits its cap without a Termination summary (and without a fault).</summary>
+        public bool NoTermination { get; set; }
+
         public Task<TerminationMessage?> ShutdownAsync(TimeSpan hardCap, CancellationToken ct)
         {
             ShutdownCalled = true;
@@ -1008,6 +1057,11 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             if (FaultBeforeShutdown)
             {
                 Fault(new System.Net.WebSockets.WebSocketException("socket dropped"));
+                return Task.FromResult<TerminationMessage?>(null);
+            }
+
+            if (NoTermination)
+            {
                 return Task.FromResult<TerminationMessage?>(null);
             }
 

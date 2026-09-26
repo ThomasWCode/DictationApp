@@ -5,8 +5,9 @@ using NAudio.Wave;
 namespace DictationApp.Windows.Audio;
 
 /// <summary>
-/// Plays a WAV file into the pipeline as if it were a microphone, at <c>speed</c>× real time (4× for
-/// history Retry, 1× for <c>--stream-test</c>). Raises <see cref="Completed"/> at end of file.
+/// Plays a WAV file into the pipeline as if it were a microphone, at <c>speed</c>× real time (1× for history Retry and
+/// <c>--stream-test</c>: AssemblyAI cannot process a faster stream in time). Raises <see cref="Completed"/> at end of
+/// file, after flushing the last partial frame.
 /// </summary>
 public sealed class WavReplayAudioCapture : IAudioCapture
 {
