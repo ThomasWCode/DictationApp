@@ -8,12 +8,13 @@ updates, Open logs folder, Quit). Double-clicking the tray icon opens History.
 
 | Feature | Behaviour |
 |---|---|
-| Hold-to-talk | Hold the chord (default **Ctrl+Win**), speak, release. Audio is captured from the instant the chord goes down, before the server connection exists, so nothing is lost to connect latency. |
+| Hold-to-talk | Hold the chord (default **Ctrl+Win**), speak, release. Audio is captured from the instant the chord goes down, before the server connection exists, so nothing is lost to connect latency. Releasing ends the recording at once, even while the connection is still being set up; the last fraction of a second before the release is kept. |
 | Microphone ready | The microphone is opened once while idle and only started on the key press, so recording begins 15–100 ms after the chord instead of up to 1.5 s (opening DSP microphones such as Intel Smart Sound is slow). Windows shows the microphone as in use only while dictating. The window and browser-URL lookup runs after the microphone has started. A device change, error or turning off Settings › Audio › "Keep the microphone ready" falls back to opening the device on each press. |
-| Double-tap for hands-free | Tap the chord twice within 400 ms and the dictation keeps running with nothing held; press the chord once to stop. Both ways work all the time, no mode to choose. In hands-free mode only Escape is intercepted (discard); the keyboard otherwise behaves normally, so tone and level are changed with the Flow bar chips. |
-| Short tap | A lone press shorter than 300 ms is cancelled before the streaming session begins, so it costs nothing. |
+| Double-tap for hands-free | Tap the chord twice within 400 ms and the dictation the first tap started keeps running with nothing held (its microphone has been on since that first tap); press the chord once to stop. Both ways work all the time, no mode to choose. In hands-free mode only Escape is intercepted (discard, while it records); the keyboard otherwise behaves normally, so tone and level are changed with the Flow bar chips. "Start dictation" in the tray menu starts a hands-free dictation too. |
+| Short tap | A lone press shorter than 300 ms (timed from the key presses themselves, however long the start-up takes) is cancelled once the 400 ms double-tap window has passed: nothing is inserted or stored. The streaming session has usually not begun by then; if it has, at most a fraction of a second is billed. |
 | Start menu stays closed | When a chord containing Win fires, an unassigned virtual key (0xE8) is injected so Windows treats the Win press as part of a combination. Win alone still opens Start; Win+E, Win+D and friends work normally. |
-| Escape | Discards the current dictation: nothing is inserted or stored. |
+| Escape | Discards the current dictation while it records (the chord held, or hands-free until it stops): nothing is inserted or stored. Once released or stopped, the dictation always finishes into the field or onto the clipboard, and Escape goes to the app as usual. |
+| Quitting mid-dictation | Quit, sign-out or shutdown during a dictation keeps it in History as Failed ("Interrupted") with its audio and the words heard, for Retry. A dictation cut short by a crash or a power cut is recovered the same way at the next start. |
 | Arrow keys while holding | ←/→ cycle the tone (Neutral → Formal → Casual), ↑/↓ cycle the cleanup level. While the chord is held every other key is swallowed so Win+Ctrl+Left cannot switch virtual desktops mid-sentence. |
 | Remembered style | A tone or level change (arrow keys or chips) is remembered for next time: if an app rule applied, that rule is updated (change it in Teams, Teams remembers); otherwise it becomes the new default. Settings › Style › "Remember tone and cleanup changes" turns this off, making changes apply to one dictation only. |
 | 20-minute cap | A dictation is finalised automatically after 20 minutes (configurable 1–180). AssemblyAI bills per session second and caps sessions at 3 h. |
@@ -24,7 +25,8 @@ updates, Open logs folder, Quit). Double-clicking the tray icon opens History.
 
 | Situation | Result |
 |---|---|
-| An editable control has focus | Text is pasted (Ctrl+V, or Ctrl+Shift+V per app rule). The previous clipboard contents (text, HTML, RTF, DIB image, file list) are restored about 250 ms later, unless another app changed the clipboard in the meantime. |
+| An editable control has focus | Text is pasted (Ctrl+V, or Ctrl+Shift+V per app rule). The characters before the caret are then read back: when they match, the previous clipboard contents (text, HTML, RTF, DIB image, file list) are restored about 250 ms later, unless another app changed the clipboard in the meantime. When the control does not show its text or it differs (a browser page with no field focused, an app without UI Automation text), the dictation stays on the clipboard as well ("also copied" on the Flow bar), so it can still be pasted by hand. |
+| The window closed, cannot be brought to the front, or Windows blocks the keystrokes | Nothing is pasted; the text is copied and a toast names the app. |
 | Nothing editable has focus (desktop, a button, a list) | Text is copied to the clipboard and a toast says so. |
 | Target runs elevated (Run as administrator) | UIPI would silently drop the paste, so the text is copied instead and the toast says "Target is elevated, text copied". |
 | Focus moved to another window during dictation | The text is pasted into the new window; the tone chosen at the start is kept. |
@@ -35,7 +37,8 @@ updates, Open logs folder, Quit). Double-clicking the tray icon opens History.
 Editable detection order: UI Automation focused element (Edit/Document/ComboBox, writable Value pattern, Text
 pattern; buttons, list items etc. count as not editable) → a caret in the foreground thread → a process
 allowlist (terminals, editors, Office, browsers, chat apps) → editable by default, because a paste into a
-non-editable control is harmless and the text stays on the clipboard.
+non-editable control is harmless, and a paste that cannot be confirmed afterwards leaves the text on the clipboard as
+well.
 
 ## Cleanup and tone
 
@@ -71,10 +74,14 @@ unavailable) handles the unambiguous forms itself: "1." / "1)" / "1:" markers an
 Safety net: each model gets 4 s and the whole chain 8 s. The default chain is `openai/gpt-oss-120b` →
 `qwen/qwen3.8-27b` → `openai/gpt-oss-20b`, all on Groq's free tier (about 1000 requests per day and 8000
 tokens per minute per model; a 429 rate limit simply moves to the next model). The gpt-oss models are asked
-for low reasoning effort so they answer in under a second instead of thinking through their token budget. Output is rejected if it is empty, starts with "Here is"/"Sure"/similar, or is more than 2.5× / less
-than 0.4× the input length. On any failure the raw transcript (with regex-applied commands) is inserted and
-the Flow bar shows **cleanup skipped**. "Undo AI edit" in History puts the raw transcript on the clipboard.
-The endpoint and models are editable, so any OpenAI-compatible service can replace Groq.
+for low reasoning effort so they answer in under a second instead of thinking through their token budget. Output is rejected if the model did not finish it (it ran out of tokens or was filtered), if it is empty, starts
+with "Here is"/"Sure"/similar, or is more than 2.5× / less than 0.4× the input length; the next model is then tried.
+A model the key may not use (403) or an unknown model also moves on; only a rejected key (401) stops the chain. On
+any failure the raw transcript (with regex-applied commands) is inserted and the Flow bar shows **cleanup
+skipped**; History keeps every attempt's reason. A settings problem that keeps recurring (rejected key, a model the
+key may not use, a retired model) is shown once per run, even when a fallback model covered for it. "Undo AI edit"
+in History puts the raw transcript on the clipboard. The endpoint and models are editable, so any
+OpenAI-compatible service can replace Groq; Settings › API › Test keys tries every model of the chain.
 
 ## App-aware rules
 
@@ -107,7 +114,9 @@ used, then most recently used. Use counts are updated automatically when a term 
 the dictionary during a dictation pushes the new list mid-session (`UpdateConfiguration`).
 
 **Correct last dictation** (tray menu or Settings › Dictionary) shows the last inserted text in an editor; after
-you fix the misheard words, a word-level diff proposes the replacements as new starred terms.
+you fix the misheard words, a word-level diff proposes the replacements as new starred terms. Terms added this way
+while Settings is open appear there and survive its Save. Changes spread over thousands of words are refused with a
+message rather than compared in one go.
 
 ## History
 
@@ -117,28 +126,35 @@ model used and failure reason. The History window offers:
 
 - prefix full-text search over transcript, inserted text, window title and process;
 - Play/Stop of the stored WAV (16 kHz mono);
-- Copy; Re-insert (minimises History and pastes into the window that gets focus);
-- Retry for Failed/Pending records with audio: re-streams the WAV at 4× real time, cleans it up, copies the
-  result;
+- Copy; Re-insert (minimises History and pastes into the window that gets focus, with the same checks, spacing
+  and messages as a live dictation);
+- Retry for Failed/Pending records with audio: re-streams the WAV at real time (AssemblyAI cannot process a faster
+  stream in time, so a retry takes about as long as the recording), cleans it up, copies the result. A retry that
+  does not finish keeps the earlier words and can be tried again;
 - Undo AI edit; Delete;
 - a footer with count, records with audio and total estimated cost.
 
 Retention: text for 24 h / 14 days / forever, audio separately for 24 h / 14 days / forever. A background
-service purges at startup and hourly and also sweeps orphaned WAVs. "Store audio" can be switched off entirely;
-"Delete all history" empties everything.
+service purges at startup and hourly and also sweeps WAVs no record refers to (after a day). A recording left
+unfinished by a crash, a kill or a power cut is recovered into History as Failed at the next start, for Retry.
+"Store audio" can be switched off entirely. "Delete all history" deletes every record, every recording in the audio
+folder (including ones no record refers to) and the logs; a recording still in progress is kept and counted.
 
 ## Settings
 
-Tabs: **General** (Flow bar mode, autostart, update check, GitHub token for updates, dictation cap, language
-codes), **API** (DPAPI-encrypted AssemblyAI and Groq keys, "Test keys" reports each separately, speech model,
-cleanup endpoint, model and fallbacks), **Hotkey** (chord recorder, accept injected keys), **Audio** (device
-picker with live meter, keep the microphone ready), **Style** (default tone and level, remember changes), **Dictionary**, **App rules**,
-**History & privacy**.
+Tabs: **General** (Flow bar mode, autostart, update check, GitHub token for a private fork, dictation cap,
+language codes), **API** (DPAPI-encrypted AssemblyAI and Groq keys, "Test keys" reports AssemblyAI and every model of
+the cleanup chain separately, speech model, cleanup endpoint, model and fallbacks), **Hotkey** (chord recorder,
+which only watches the chord while it has focus; accept injected keys), **Audio** (device picker with live meter,
+keep the microphone ready; a chosen microphone that is not connected falls back to the default one), **Style**
+(default tone and level, remember changes), **Dictionary**, **App rules**, **History & privacy**. Save writes only
+what was changed in the window, so terms, remembered styles and use counts changed meanwhile are kept.
 
 ## First run, autostart, updates
 
 - A three-step wizard (AssemblyAI and Groq keys with test, microphone meter, hotkey test with a Ctrl+Alt
-  alternative) runs on first start or when no AssemblyAI key is configured.
+  alternative) runs on first start or when no AssemblyAI key is configured. The hotkey test only watches the chord:
+  nothing is recorded, uploaded, pasted or stored.
 - Autostart is on by default. An installed build re-registers the per-user Run key (launching
   `DictationApp.exe --minimized`) every time it starts, so after installing once the app is simply there in the
   tray after every sign-in; no terminal, no shortcut. Development builds only register when the Settings
@@ -148,19 +164,23 @@ picker with live meter, keep the microphone ready), **Style** (default tone and 
   so) and a "Restart to update to x.y.z" entry appears in the tray menu. Choose it to apply immediately, or do
   nothing: the update is applied when the app next exits, so the next launch, including the autostart at
   sign-in, is the new version. Only the program folder is replaced; settings, history, audio and the encrypted
-  keys live in `%LOCALAPPDATA%\ThomasWCode\DictationApp` and survive every update and reinstall. While the
-  GitHub repository is private the updater needs a GitHub token (Settings › General) to read the releases.
+  keys live in `%LOCALAPPDATA%\ThomasWCode\DictationApp` and survive every update and reinstall. The repository is
+  public, so the updater needs no token; the optional GitHub token (Settings › General) is only for a private fork.
 
 ## Privacy and cost
 
 Audio goes to AssemblyAI for transcription and the transcript to Groq for cleanup; nothing else leaves the
-machine. Both keys (and the optional GitHub token) are DPAPI-protected for the current user. History shows an
-estimate per dictation (streaming at $0.45/h for Universal-3.5 Pro or $0.15/h for the standard model; Groq's
-free tier costs nothing). No connection is kept warm while idle because sessions are billed per second.
+machine. Both keys (and the optional GitHub token) are DPAPI-protected for the current user; a key that cannot be
+decrypted (a data folder copied from another PC or user) is shown as missing. History shows an estimate per
+dictation from the time the streaming session was open, which is what AssemblyAI bills ($0.45/h for Universal-3.5
+Pro or $0.15/h for the standard model; Groq's free tier costs nothing). The AssemblyAI dashboard is authoritative.
+No connection is kept warm while idle because sessions are billed per second.
 
 ## Diagnostics
 
-- Logs: `%LOCALAPPDATA%\ThomasWCode\DictationApp\logs\dictation-YYYYMMDD.log` (14 days).
+- Logs: `%LOCALAPPDATA%\ThomasWCode\DictationApp\logs\dictation-YYYYMMDD.log` (14 days). No dictated text; one
+  timing line per dictation (ms since the press for the microphone, window lookup, Begin, release, handshake,
+  cleanup and insertion).
 - `DictationApp.exe --stream-test file.wav` streams a WAV through a real session and prints every turn.
 - `DictationApp.exe --simulate file.wav --delay 5` runs a full dictation with the WAV in place of the microphone.
 - `DictationApp.exe --check-updates [--github-token T] [--apply-update]` runs the updater headlessly and
