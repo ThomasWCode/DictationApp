@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using DictationApp.Core.Abstractions;
 using DictationApp.Core.Cleanup;
 using DictationApp.Core.History;
@@ -17,6 +18,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     private readonly FakeTimeProvider _clock = new(new DateTimeOffset(2026, 9, 22, 12, 0, 0, TimeSpan.Zero));
     private readonly FakeHotkey _hotkey = new();
     private readonly FakeCapture _capture = new();
+    private readonly FakeCaptureFactory _captures;
     private readonly FakeSinkFactory _sinks = new();
     private readonly FakeTranscriber _transcriber = new();
     private readonly FakeForeground _foreground = new();
@@ -32,10 +34,11 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     public DictationOrchestratorTests()
     {
         Directory.CreateDirectory(_dir);
+        _captures = new FakeCaptureFactory(_capture);
         _settings = new JsonSettingsStore(Path.Combine(_dir, "settings.json"), NullLogger<JsonSettingsStore>.Instance);
         _orchestrator = new DictationOrchestrator(
             _hotkey,
-            new FakeCaptureFactory(_capture),
+            _captures,
             _sinks,
             new FakeTranscriberFactory(_transcriber),
             _foreground,
@@ -142,8 +145,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         await StartAsync();
         _hotkey.PressChord();
         await WaitForState(DictationState.Arming);
-        _clock.Advance(TimeSpan.FromMilliseconds(100));
-        _hotkey.ReleaseChord();
+        _hotkey.ReleaseChord(ChordRelease.Tap);
         await WaitForIdleSession();
 
         Assert.True(_transcriber.Aborted);
@@ -152,6 +154,385 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         Assert.Empty(_history.Records);
         Assert.Null(_inserter.LastText);
         Assert.False(_capture.IsRunning);
+    }
+
+    [Fact]
+    public async Task Tap_is_cancelled_even_when_the_session_began_first()
+    {
+        // The tap verdict comes from the key times, so a fast connection cannot turn it into a dictation.
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Accidental.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        await WaitForIdleSession();
+
+        Assert.True(_transcriber.Aborted);
+        Assert.Null(_inserter.LastText);
+        Assert.Empty(_history.Records);
+        Assert.True(_sinks.Last!.Discarded);
+        Assert.Null(_hub.Current.Badge);
+    }
+
+    [Fact]
+    public async Task Slow_window_lookup_does_not_turn_a_hold_into_a_tap_or_a_tap_into_a_hold()
+    {
+        // The release is classified by the hotkey service when the key goes up; how long the start-up work (window
+        // lookup, microphone) takes no longer matters.
+        using var lookup = new ManualResetEventSlim();
+        _foreground.OnCapture = () => lookup.Wait(TimeSpan.FromSeconds(5));
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _hotkey.ReleaseChord(ChordRelease.Hold);
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        lookup.Set();
+        await WaitFor(() => _orchestrator.State == DictationState.Finalising, "hold finalising");
+        _transcriber.CompleteConnect();
+        await WaitForIdleSession();
+
+        Assert.True(_transcriber.ShutdownCalled);
+        Assert.False(_transcriber.Aborted);
+    }
+
+    [Fact]
+    public async Task A_dictation_that_fails_to_start_answers_the_press_before_its_idle()
+    {
+        // The hotkey service takes an Idle for a dictation's end only once that dictation has answered the press with
+        // Arming; a microphone that cannot open must still answer first, or a tap or double tap stays latched.
+        await StartAsync();
+        _capture.StartError = new InvalidOperationException("no microphone");
+        var seen = new ConcurrentQueue<DictationState>();
+        _hub.Changed += s => seen.Enqueue(s.State);
+
+        _hotkey.PressChord();
+        await WaitFor(() => seen.Contains(DictationState.Idle), "the failed start ended");
+
+        var states = seen.ToArray();
+        Assert.Equal(DictationState.Arming, states[0]);
+        Assert.Equal(DictationState.Idle, states[^1]);
+        Assert.Equal("Failed", _hub.Current.Badge);
+    }
+
+    [Fact]
+    public async Task A_release_during_a_slow_window_lookup_stops_the_microphone_at_once()
+    {
+        using var lookup = new ManualResetEventSlim();
+        _foreground.OnCapture = () => lookup.Wait(TimeSpan.FromSeconds(5));
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitFor(() => _capture.IsRunning, "microphone started");
+
+        _hotkey.ReleaseChord(ChordRelease.Hold);
+        await WaitFor(() => !_capture.IsRunning, "microphone stopped while the lookup is still running");
+
+        lookup.Set();
+        _transcriber.CompleteConnect();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
+    public async Task A_window_lookup_that_never_returns_does_not_hold_the_dictation()
+    {
+        // A hung app must not keep a dictation recording before its time limit is even running.
+        using var hung = new ManualResetEventSlim();
+        var lookups = 0;
+        _foreground.OnCapture = () =>
+        {
+            Interlocked.Increment(ref lookups);
+            hung.Wait(TimeSpan.FromSeconds(30));
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitFor(() => Volatile.Read(ref lookups) == 1, "the lookup started");
+        _clock.Advance(DictationOrchestrator.LookupTimeout);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Still here.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord();
+        await WaitFor(() => Volatile.Read(ref lookups) == 2, "the insertion's lookup started");
+        _clock.Advance(DictationOrchestrator.LookupTimeout);
+        await WaitForIdleSession();
+        hung.Set();
+
+        Assert.Equal("Still here.", Assert.Single(_history.Records).RawTranscript);
+    }
+
+    [Fact]
+    public async Task Deleting_a_dictation_stops_its_retry()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        _transcriber.CompleteConnect();
+        _transcriber.OnConnected = () => _transcriber.RaiseTurn(0, "Deleted text.", endOfTurn: true, formatted: true);
+        _capture.CompleteOnStart = true;
+        _post.Gate = new TaskCompletionSource();
+        var retry = _orchestrator.RetryAsync(id, CancellationToken.None);
+        await WaitFor(() => _post.LastRequest is not null, "the retry is cleaning up");
+
+        _orchestrator.CancelRetry(id);
+
+        Assert.False(await retry.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Null(_clipboard.Text);
+        Assert.DoesNotContain(_notifier.Toasts, t => t.Title.StartsWith("Retry", StringComparison.Ordinal));
+        _post.Gate.SetResult();
+    }
+
+    [Fact]
+    public async Task A_retry_whose_connection_times_out_reports_a_failure()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        // What the connection's own time limit raises: a cancellation, though nobody cancelled the Retry.
+        _transcriber.FailConnect(new OperationCanceledException());
+
+        Assert.False(await _orchestrator.RetryAsync(id, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Retry failed");
+        Assert.Equal("retry: Connection timed out", (await _history.GetAsync(id, CancellationToken.None))!.FailureReason);
+    }
+
+    [Fact]
+    public async Task A_press_while_a_retry_streams_flashes_busy_and_starts_nothing()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        _transcriber.CompleteConnect();
+        _transcriber.OnConnected = () => _transcriber.RaiseTurn(0, "Recovered text.", endOfTurn: true, formatted: true);
+        _capture.CompleteOnStart = true;
+        _post.Gate = new TaskCompletionSource();
+        var flashes = 0;
+        _hub.Flashed += () => Interlocked.Increment(ref flashes);
+
+        var retry = _orchestrator.RetryAsync(id, CancellationToken.None);
+        await WaitFor(() => _post.LastRequest is not null, "the retry is cleaning up");
+        _hotkey.PressChord();
+        await WaitFor(() => Volatile.Read(ref flashes) == 1, "busy flash");
+        Assert.Equal(DictationState.Idle, _orchestrator.State);
+
+        _post.Gate.SetResult();
+        Assert.True(await retry);
+        _hotkey.ReleaseChord();
+    }
+
+    [Fact]
+    public async Task A_tap_being_cancelled_publishes_nothing_once_a_new_press_has_replaced_it()
+    {
+        // The hotkey service reads the status stream: the replaced session's level updates and closing Idle must not look
+        // like the new dictation answering its press and then ending, or the new press's tap would be dropped and it
+        // would record on with nothing able to stop it.
+        using var lookup = new ManualResetEventSlim();
+        var lookups = 0;
+        _foreground.OnCapture = () =>
+        {
+            if (Interlocked.Increment(ref lookups) == 1)
+            {
+                lookup.Wait(TimeSpan.FromSeconds(5)); // the tap's session starts slowly
+            }
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        await WaitFor(() => _hub.Current.StartedAt is not null, "the tap's dictation published");
+        var tapStartedAt = _hub.Current.StartedAt;
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        _clock.Advance(TimeSpan.FromSeconds(1));
+        _hotkey.PressChord();
+        await Task.Delay(50);
+
+        var seen = new ConcurrentQueue<DictationStatus>();
+        _hub.Changed += seen.Enqueue;
+        _capture.Emit(1); // the tap's microphone is still running
+        lookup.Set();
+        await WaitFor(() => seen.Any(s => s.State == DictationState.Arming && s.StartedAt is { } at && at != tapStartedAt), "the new dictation answered");
+
+        Assert.DoesNotContain(seen, s => s.State == DictationState.Idle);
+        Assert.DoesNotContain(seen, s => s.StartedAt == tapStartedAt);
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        await WaitForIdleSession();
+    }
+
+    [Fact]
+    public async Task A_new_press_while_a_tap_is_being_cancelled_starts_a_dictation_instead_of_flashing_busy()
+    {
+        using var lookup = new ManualResetEventSlim();
+        var lookups = 0;
+        _foreground.OnCapture = () =>
+        {
+            if (Interlocked.Increment(ref lookups) == 1)
+            {
+                lookup.Wait(TimeSpan.FromSeconds(5)); // the tap's session is stuck in a slow window lookup
+            }
+        };
+        var flashes = 0;
+        _hub.Flashed += () => flashes++;
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _hotkey.ReleaseChord(ChordRelease.Tap);
+        await Task.Delay(50);
+        _hotkey.PressChord();                     // a new press after the double-tap window
+        await Task.Delay(50);
+        lookup.Set();
+
+        await WaitFor(() => Volatile.Read(ref lookups) == 2, "second dictation started");
+        Assert.Equal(0, flashes);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Second.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord();
+        await WaitForIdleSession();
+        Assert.Equal("Second. [cleaned]", _inserter.LastText);
+    }
+
+    [Fact]
+    public async Task Release_before_begin_stops_the_microphone_at_once()
+    {
+        // Nothing said after the release is recorded or uploaded, even while the connection is still being set up.
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _capture.Emit(1);
+        _hotkey.ReleaseChord();
+        await WaitFor(() => !_capture.IsRunning, "microphone stopped at the release");
+        Assert.False(_transcriber.IsConnected);
+        _capture.Emit(2);                         // a real microphone delivers nothing after Stop
+        _transcriber.RaiseTurnsOnConnect("Pre-release words.");
+        _transcriber.CompleteConnect();
+        await WaitForIdleSession();
+
+        Assert.Equal(1, _transcriber.FramesReceived);
+        Assert.Equal(AudioFrame.BytesPerFrame, _sinks.Last!.BytesWritten);
+        Assert.Equal("Pre-release words. [cleaned]", _inserter.LastText);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_last_partial_frame_delivered_by_stop_reaches_the_stream_and_the_recording(bool releaseBeforeBegin)
+    {
+        _capture.FrameOnStop = 9;
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _capture.Emit(1);
+        if (!releaseBeforeBegin)
+        {
+            _transcriber.CompleteConnect();
+            await WaitForState(DictationState.Recording);
+        }
+
+        _transcriber.RaiseTurnsOnConnect("Last word.");
+        _hotkey.ReleaseChord();
+        if (releaseBeforeBegin)
+        {
+            await WaitFor(() => !_capture.IsRunning, "stopped");
+            _transcriber.CompleteConnect();
+        }
+        else
+        {
+            _transcriber.RaiseTurn(0, "Last word.", endOfTurn: true, formatted: true);
+        }
+
+        await WaitForIdleSession();
+        Assert.Equal(2, _transcriber.FramesReceived);
+        Assert.Equal(2 * AudioFrame.BytesPerFrame, _sinks.Last!.BytesWritten);
+    }
+
+    [Fact]
+    public async Task Escape_then_release_during_a_slow_start_discards()
+    {
+        // Both arrive before the session looks: the discard wins over the release.
+        using var lookup = new ManualResetEventSlim();
+        _foreground.OnCapture = () => lookup.Wait(TimeSpan.FromSeconds(5));
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _hotkey.Escape();
+        _hotkey.ReleaseChord();
+        await Task.Delay(50);
+        lookup.Set();
+        await WaitForIdleSession();
+
+        Assert.True(_transcriber.Aborted);
+        Assert.Empty(_history.Records);
+        Assert.Null(_inserter.LastText);
+        Assert.Equal("Discarded", _hub.Current.Badge);
+    }
+
+    [Fact]
+    public async Task Escape_after_the_release_is_ignored_and_the_dictation_finishes()
+    {
+        _post.Gate = new TaskCompletionSource();
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Keep me.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord();
+        await WaitForState(DictationState.PostProcessing);
+        _hotkey.Escape();
+        await Task.Delay(50);
+        _post.Gate.SetResult();
+        await WaitForIdleSession();
+
+        Assert.Equal("Keep me. [cleaned]", _inserter.LastText);
+        Assert.Equal(RecordStatus.Inserted, Assert.Single(_history.Records).Status);
+    }
+
+    [Fact]
+    public async Task Escape_after_the_time_cap_is_ignored_and_the_dictation_finishes()
+    {
+        await _settings.UpdateAsync(s => s.MaxDictationMinutes = 1);
+        _post.Gate = new TaskCompletionSource();
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "A long one.", endOfTurn: true, formatted: true);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+        await WaitForState(DictationState.PostProcessing);
+        _hotkey.Escape();
+        await Task.Delay(50);
+        _post.Gate.SetResult();
+        await WaitForIdleSession();
+
+        Assert.Equal("A long one. [cleaned]", _inserter.LastText);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Dictation limit");
+    }
+
+    [Fact]
+    public async Task Closing_the_app_mid_dictation_keeps_it_for_retry()
+    {
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _capture.Emit(1);
+        _transcriber.RaiseTurn(0, "half a thought", endOfTurn: false);
+        await WaitFor(() => _hub.Current.LiveText == "half a thought", "live text");
+
+        await _orchestrator.StopAsync(CancellationToken.None);
+
+        var record = Assert.Single(_history.Records);
+        Assert.Equal(RecordStatus.Failed, record.Status);
+        Assert.Equal(DictationOrchestrator.InterruptedReason, record.FailureReason);
+        Assert.Equal("half a thought", record.RawTranscript);
+        Assert.NotNull(record.AudioPath);
+        Assert.True(_sinks.Last!.Completed);
+        Assert.Null(_inserter.LastText);
+        Assert.DoesNotContain(_notifier.Toasts, t => t.Title == "Dictation limit");
     }
 
     [Fact]
@@ -263,6 +644,104 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         _foreground.TextBeforeCaret = null;
         await DictateAsync("Third.");
         Assert.StartsWith(" Third.", _inserter.LastText);
+    }
+
+    [Fact]
+    public async Task A_paste_that_could_not_be_confirmed_leaves_the_text_on_the_clipboard_too()
+    {
+        _inserter.Result = new InsertionResult(InsertionOutcome.Inserted, "Pasted into notepad; also on the clipboard", LeftOnClipboard: true);
+        await StartAsync();
+        await DictateAsync("Unsure.");
+
+        Assert.Equal(RecordStatus.Inserted, Assert.Single(_history.Records).Status);
+        Assert.Equal("also copied", _hub.Current.Badge);
+        Assert.Empty(_notifier.Toasts);
+    }
+
+    [Fact]
+    public async Task A_paste_the_target_refused_is_copied_with_a_toast_and_forgets_the_spacing_memory()
+    {
+        await StartAsync();
+        await DictateAsync("First.");                  // remembered: the next text would get a leading space
+        _inserter.Result = new InsertionResult(InsertionOutcome.CopiedOnly, "Could not bring notepad to the front, text copied");
+        await DictateAsync("Second.");
+        Assert.Equal(RecordStatus.CopiedOnly, _history.Records[^1].Status);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Copied to clipboard" && t.Message.Contains("front", StringComparison.Ordinal));
+
+        _inserter.Result = new InsertionResult(InsertionOutcome.Inserted);
+        await DictateAsync("Third.");
+        Assert.Equal("Third. [cleaned]", _inserter.LastText); // "Second." never landed there, so no leading space
+    }
+
+    [Fact]
+    public async Task A_failed_paste_puts_the_text_on_the_clipboard_and_says_so()
+    {
+        _inserter.Result = new InsertionResult(InsertionOutcome.Failed, "Clipboard busy");
+        await StartAsync();
+        await DictateAsync("Keep me.");
+
+        Assert.Equal("Keep me. [cleaned]", _clipboard.Text);
+        var record = Assert.Single(_history.Records);
+        Assert.Equal(RecordStatus.Failed, record.Status);
+        Assert.Contains("Clipboard busy", record.FailureReason);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Could not insert" && t.Message.Contains("copied", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Re_insert_uses_the_same_checks_and_toasts_as_a_live_dictation()
+    {
+        await StartAsync();
+        _foreground.TextBeforeCaret = "";
+        var ok = await _orchestrator.ReInsertAsync(" Earlier text.", CancellationToken.None);
+        Assert.Equal(InsertionOutcome.Inserted, ok.Outcome);
+        Assert.Equal("Earlier text.", _inserter.LastText); // the stored leading space is decided afresh
+
+        _foreground.Context = _foreground.Context with { IsEditable = false, EditableReason = "uia:Button" };
+        var copied = await _orchestrator.ReInsertAsync("Earlier text.", CancellationToken.None);
+        Assert.Equal(InsertionOutcome.CopiedOnly, copied.Outcome);
+        Assert.Equal("Earlier text.", _clipboard.Text);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Copied to clipboard");
+        Assert.Empty(_history.Records); // the record is not touched
+    }
+
+    [Fact]
+    public async Task Re_insert_waits_for_a_running_dictation()
+    {
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitForState(DictationState.Arming);
+
+        var result = await _orchestrator.ReInsertAsync("Text.", CancellationToken.None);
+
+        Assert.Equal(InsertionOutcome.Failed, result.Outcome);
+        Assert.Contains(_notifier.Toasts, t => t.Message.Contains("Finish the current dictation", StringComparison.Ordinal));
+        _hotkey.Escape();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
+    public async Task The_recording_is_finished_only_after_its_record_is_saved()
+    {
+        // Until then its header keeps the "unfinished" marker, so a crash during cleanup or insertion leaves a file the
+        // next start recovers into History instead of an orphan the sweep deletes.
+        _sinks.Probe = () => _history.Records.Count;
+        await StartAsync();
+        await DictateAsync("Saved first.");
+
+        Assert.Equal(1, _sinks.Last!.ProbeAtComplete);
+    }
+
+    [Fact]
+    public async Task A_recurring_cleanup_problem_is_reported_once_per_run()
+    {
+        // Even when a fallback model covered for it: otherwise the preferred model could silently stop being used.
+        _post.Problem = "The Groq key may not use a.";
+        await StartAsync();
+        await DictateAsync("One.");
+        await DictateAsync("Two.");
+
+        Assert.Single(_notifier.Toasts, t => t.Message == "The Groq key may not use a.");
+        Assert.All(_history.Records, r => Assert.Null(r.FailureReason));
     }
 
     private async Task DictateAsync(string text)
@@ -574,6 +1053,44 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         Assert.Equal(RecordStatus.CopiedOnly, record!.Status);
         Assert.Equal("Recovered text. [cleaned]", record.InsertedText);
         Assert.Equal("Recovered text. [cleaned]", _clipboard.Text);
+
+        // Paced at real time (AssemblyAI cannot keep up with a faster stream) and billed for the session, not the audio.
+        Assert.Equal(DictationOrchestrator.RetryReplaySpeed, _captures.LastReplaySpeed);
+        Assert.Equal(1.0, DictationOrchestrator.RetryReplaySpeed);
+        Assert.Equal(CostEstimator.SttCost(_settings.Current.SpeechModel, TimeSpan.FromSeconds(2)), record.CostEstimate);
+    }
+
+    [Fact]
+    public async Task Retry_that_ends_without_a_summary_keeps_the_earlier_words_and_stays_retryable()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, RawTranscript = "the earlier, longer words", CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        _transcriber.CompleteConnect();
+        _transcriber.OnConnected = () => _transcriber.RaiseTurn(0, "The earlier", endOfTurn: false);
+        _transcriber.NoTermination = true;
+        _capture.CompleteOnStart = true;
+
+        var ok = await _orchestrator.RetryAsync(id, CancellationToken.None);
+
+        Assert.False(ok);
+        var record = await _history.GetAsync(id);
+        Assert.Equal(RecordStatus.Failed, record!.Status);
+        Assert.Equal("the earlier, longer words", record.RawTranscript);
+        Assert.Contains("did not finish", record.FailureReason);
+        Assert.Null(_clipboard.Text);
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Retry failed");
+    }
+
+    [Fact]
+    public async Task Cost_is_estimated_from_the_billed_session_not_the_audio_length()
+    {
+        await StartAsync();
+        await DictateAsync("Billed.");
+
+        // The fake session reports 1.5 s of audio in a 2 s session: AssemblyAI bills the session.
+        Assert.Equal(CostEstimator.SttCost(_settings.Current.SpeechModel, TimeSpan.FromSeconds(2)) + CostEstimator.LlmCost("fake-model", 50, 10), Assert.Single(_history.Records).CostEstimate);
     }
 
     // ---- fakes -------------------------------------------------------------------------------------
@@ -582,7 +1099,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public event Action? ChordDown;
 
-        public event Action? ChordUp;
+        public event Action<ChordRelease>? ChordUp;
 
         public event Action? EscapePressed;
 
@@ -602,10 +1119,10 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             ChordDown?.Invoke();
         }
 
-        public void ReleaseChord()
+        public void ReleaseChord(ChordRelease release = ChordRelease.Hold)
         {
             IsChordHeld = false;
-            ChordUp?.Invoke();
+            ChordUp?.Invoke(release);
         }
 
         public void Escape() => EscapePressed?.Invoke();
@@ -625,8 +1142,19 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public bool CompleteOnStart { get; set; }
 
+        /// <summary>When set, Start throws it, like a microphone that cannot be opened.</summary>
+        public Exception? StartError { get; set; }
+
+        /// <summary>When set, Stop delivers one last frame of this fill first, like the microphone's partial tail.</summary>
+        public byte? FrameOnStop { get; set; }
+
         public void Start()
         {
+            if (StartError is { } error)
+            {
+                throw error;
+            }
+
             IsRunning = true;
             if (CompleteOnStart)
             {
@@ -638,12 +1166,26 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             }
         }
 
-        public void Stop() => IsRunning = false;
+        public void Stop()
+        {
+            if (IsRunning && FrameOnStop is { } fill)
+            {
+                Emit(fill);
+            }
+
+            IsRunning = false;
+        }
 
         public void Dispose() => Stop();
 
+        /// <summary>A frame from the microphone; like a real one, nothing arrives once it is stopped.</summary>
         public void Emit(byte fill)
         {
+            if (!IsRunning)
+            {
+                return;
+            }
+
             var bytes = new byte[AudioFrame.BytesPerFrame];
             Array.Fill(bytes, fill);
             FrameCaptured?.Invoke(new AudioFrame(bytes, 0.5f, TimeSpan.Zero));
@@ -654,12 +1196,18 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
     private sealed class FakeCaptureFactory(FakeCapture capture) : IAudioCaptureFactory
     {
+        public double? LastReplaySpeed { get; private set; }
+
         public IAudioCapture CreateMicrophone(string? deviceId) => capture;
 
-        public IAudioCapture CreateWavReplay(string wavPath, double speed) => capture;
+        public IAudioCapture CreateWavReplay(string wavPath, double speed)
+        {
+            LastReplaySpeed = speed;
+            return capture;
+        }
     }
 
-    private sealed class MemorySink(string path) : IAudioSink
+    private sealed class MemorySink(string path, Func<int>? probe) : IAudioSink
     {
         public string Path { get; } = path;
 
@@ -669,9 +1217,16 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public bool Discarded { get; private set; }
 
+        /// <summary>What the factory's probe said when the recording was finished (the number of saved records, say).</summary>
+        public int? ProbeAtComplete { get; private set; }
+
         public void Write(ReadOnlySpan<byte> pcm16) => BytesWritten += pcm16.Length;
 
-        public void Complete() => Completed = true;
+        public void Complete()
+        {
+            Completed = true;
+            ProbeAtComplete = probe?.Invoke();
+        }
 
         public void Discard() => Discarded = true;
 
@@ -684,7 +1239,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public MemorySink? Last { get; private set; }
 
-        public IAudioSink Create(string path) => Last = new MemorySink(path);
+        public Func<int>? Probe { get; set; }
+
+        public IAudioSink Create(string path) => Last = new MemorySink(path, Probe);
     }
 
     private sealed class FakeTranscriber : IStreamingTranscriber
@@ -708,6 +1265,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         public Action? OnConnected { get; set; }
 
         public void CompleteConnect() => _connect.TrySetResult(new BeginMessage { Id = "s1" });
+
+        /// <summary>The transcript the server returns for audio that was buffered before Begin.</summary>
+        public void RaiseTurnsOnConnect(string text) => OnConnected = () => RaiseTurn(0, text, endOfTurn: true, formatted: true);
 
         public void FailConnect(Exception ex) => _connect.TrySetException(ex);
 
@@ -748,6 +1308,9 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         /// <summary>Raise a socket fault after the release, when the session no longer awaits it, and return no summary.</summary>
         public bool FaultBeforeShutdown { get; set; }
 
+        /// <summary>The handshake hits its cap without a Termination summary (and without a fault).</summary>
+        public bool NoTermination { get; set; }
+
         public Task<TerminationMessage?> ShutdownAsync(TimeSpan hardCap, CancellationToken ct)
         {
             ShutdownCalled = true;
@@ -760,6 +1323,11 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             if (FaultBeforeShutdown)
             {
                 Fault(new System.Net.WebSockets.WebSocketException("socket dropped"));
+                return Task.FromResult<TerminationMessage?>(null);
+            }
+
+            if (NoTermination)
+            {
                 return Task.FromResult<TerminationMessage?>(null);
             }
 
@@ -816,11 +1384,14 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public PasteMode? LastPasteMode { get; private set; }
 
+        /// <summary>What the paste reports (Inserted by default).</summary>
+        public InsertionResult Result { get; set; } = new(InsertionOutcome.Inserted);
+
         public Task<InsertionResult> InsertAsync(string text, ForegroundContext target, PasteMode pasteMode, CancellationToken ct)
         {
             LastText = text;
             LastPasteMode = pasteMode;
-            return Task.FromResult(new InsertionResult(InsertionOutcome.Inserted));
+            return Task.FromResult(Result);
         }
     }
 
@@ -848,14 +1419,25 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     {
         public bool Fail { get; set; }
 
+        /// <summary>When set, cleanup waits for it, holding the session in PostProcessing.</summary>
+        public TaskCompletionSource? Gate { get; set; }
+
+        /// <summary>A recurring settings problem the cleanup reports (rejected key, blocked or retired model).</summary>
+        public string? Problem { get; set; }
+
         public PostProcessRequest? LastRequest { get; private set; }
 
-        public Task<PostProcessResult> ProcessAsync(string rawTranscript, PostProcessRequest request, CancellationToken ct)
+        public async Task<PostProcessResult> ProcessAsync(string rawTranscript, PostProcessRequest request, CancellationToken ct)
         {
             LastRequest = request;
-            return Task.FromResult(Fail
-                ? new PostProcessResult(rawTranscript, false, null, "gateway-down")
-                : new PostProcessResult(rawTranscript + " [cleaned]", true, "fake-model", null, 50, 10));
+            if (Gate is { } gate)
+            {
+                await gate.Task.WaitAsync(ct);
+            }
+
+            return Fail
+                ? new PostProcessResult(rawTranscript, false, null, "gateway-down", ConfigurationProblem: Problem)
+                : new PostProcessResult(rawTranscript + " [cleaned]", true, "fake-model", null, 50, 10, Problem);
         }
     }
 
@@ -908,5 +1490,8 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             Records.Clear();
             return Task.FromResult<IReadOnlyList<string>>([]);
         }
+
+        public Task<IReadOnlyList<string>> GetReferencedAudioPathsAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<string>>(Records.Where(r => r.AudioPath is not null).Select(r => r.AudioPath!).ToArray());
     }
 }

@@ -1,8 +1,10 @@
 namespace DictationApp.Core.History;
 
 /// <summary>
-/// Best-effort USD estimate shown in History. Streaming is billed per audio hour; the LLM Gateway passes
-/// provider prices through at 0% markup (USD per million tokens). Unknown models estimate as zero.
+/// Best-effort USD estimate shown in History. AssemblyAI bills streaming for the time the session is open (not the
+/// audio length), so callers pass the session duration from the Termination summary when there is one. Cleanup runs
+/// on Groq's free tier; the token table only matters for a paid OpenAI-compatible endpoint (USD per million tokens).
+/// Unknown LLM models estimate as zero; an unknown speech model at the Universal-3.5 Pro rate.
 /// </summary>
 public static class CostEstimator
 {

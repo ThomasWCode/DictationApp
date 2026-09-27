@@ -1,41 +1,47 @@
 using DictationApp.Core.Session;
-using Microsoft.Extensions.Time.Testing;
 
 namespace DictationApp.Core.Tests;
 
 public class DictationStateMachineTests
 {
-    private static (DictationStateMachine Machine, FakeTimeProvider Clock) Create()
-    {
-        var clock = new FakeTimeProvider(new DateTimeOffset(2026, 9, 22, 12, 0, 0, TimeSpan.Zero));
-        return (new DictationStateMachine(clock), clock);
-    }
+    private static DictationStateMachine Create() => new();
 
     [Fact]
     public void Starts_idle_and_arms_on_chord_down()
     {
-        var (m, _) = Create();
+        var m = Create();
         Assert.Equal(DictationState.Idle, m.State);
         Assert.Equal(DictationState.Arming, m.Fire(DictationTrigger.ChordDown));
     }
 
     [Fact]
-    public void Short_tap_returns_to_idle_and_is_flagged()
+    public void Tap_before_begin_returns_to_idle_and_is_flagged()
     {
-        var (m, clock) = Create();
+        var m = Create();
         m.Fire(DictationTrigger.ChordDown);
-        clock.Advance(TimeSpan.FromMilliseconds(120));
 
-        Assert.Equal(DictationState.Idle, m.Fire(DictationTrigger.ChordUp));
+        Assert.Equal(DictationState.Idle, m.Fire(DictationTrigger.Tap));
         Assert.True(m.LastReleaseWasShortTap);
     }
 
     [Fact]
-    public void Release_after_threshold_before_begin_goes_to_finalising()
+    public void Tap_after_begin_still_cancels()
     {
-        var (m, clock) = Create();
+        // The hotkey service classifies from the physical key times, so a fast connection no longer turns a tap into
+        // a recorded, inserted dictation.
+        var m = Create();
         m.Fire(DictationTrigger.ChordDown);
-        clock.Advance(TimeSpan.FromMilliseconds(300));
+        m.Fire(DictationTrigger.BeginReceived);
+
+        Assert.Equal(DictationState.Idle, m.Fire(DictationTrigger.Tap));
+        Assert.True(m.LastReleaseWasShortTap);
+    }
+
+    [Fact]
+    public void Release_before_begin_goes_to_finalising()
+    {
+        var m = Create();
+        m.Fire(DictationTrigger.ChordDown);
 
         Assert.Equal(DictationState.Finalising, m.Fire(DictationTrigger.ChordUp));
         Assert.False(m.LastReleaseWasShortTap);
@@ -44,13 +50,12 @@ public class DictationStateMachineTests
     [Fact]
     public void Full_happy_path()
     {
-        var (m, clock) = Create();
+        var m = Create();
         var transitions = new List<DictationTransition>();
         m.Transitioned += transitions.Add;
 
         m.Fire(DictationTrigger.ChordDown);
         Assert.Equal(DictationState.Recording, m.Fire(DictationTrigger.BeginReceived));
-        clock.Advance(TimeSpan.FromSeconds(5));
         Assert.Equal(DictationState.Finalising, m.Fire(DictationTrigger.ChordUp));
         Assert.Equal(DictationState.PostProcessing, m.Fire(DictationTrigger.HandshakeComplete));
         Assert.Equal(DictationState.Inserting, m.Fire(DictationTrigger.PostProcessed));
@@ -65,7 +70,7 @@ public class DictationStateMachineTests
     [InlineData(DictationTrigger.Failed)]
     public void Arming_failure_paths_return_to_idle(DictationTrigger trigger)
     {
-        var (m, _) = Create();
+        var m = Create();
         m.Fire(DictationTrigger.ChordDown);
         Assert.Equal(DictationState.Idle, m.Fire(trigger));
     }
@@ -73,7 +78,7 @@ public class DictationStateMachineTests
     [Fact]
     public void Escape_marks_session_discarded()
     {
-        var (m, _) = Create();
+        var m = Create();
         m.Fire(DictationTrigger.ChordDown);
         m.Fire(DictationTrigger.BeginReceived);
         m.Fire(DictationTrigger.Escape);
@@ -83,9 +88,26 @@ public class DictationStateMachineTests
     }
 
     [Fact]
+    public void Escape_is_ignored_once_the_dictation_stopped_recording()
+    {
+        // A discard is only possible while recording; after the release the dictation always finishes.
+        var m = Create();
+        m.Fire(DictationTrigger.ChordDown);
+        m.Fire(DictationTrigger.BeginReceived);
+        m.Fire(DictationTrigger.CapReached);
+        Assert.Equal(DictationState.Finalising, m.Fire(DictationTrigger.Escape));
+
+        m.Fire(DictationTrigger.HandshakeComplete);
+        Assert.Equal(DictationState.PostProcessing, m.Fire(DictationTrigger.Escape));
+        m.Fire(DictationTrigger.PostProcessed);
+        Assert.Equal(DictationState.Inserting, m.Fire(DictationTrigger.Escape));
+        Assert.False(m.WasDiscarded);
+    }
+
+    [Fact]
     public void Cap_reached_finalises_recording()
     {
-        var (m, _) = Create();
+        var m = Create();
         m.Fire(DictationTrigger.ChordDown);
         m.Fire(DictationTrigger.BeginReceived);
         Assert.Equal(DictationState.Finalising, m.Fire(DictationTrigger.CapReached));
@@ -94,7 +116,7 @@ public class DictationStateMachineTests
     [Fact]
     public void Nothing_heard_goes_idle_from_finalising()
     {
-        var (m, _) = Create();
+        var m = Create();
         m.Fire(DictationTrigger.ChordDown);
         m.Fire(DictationTrigger.BeginReceived);
         m.Fire(DictationTrigger.ChordUp);
@@ -104,7 +126,7 @@ public class DictationStateMachineTests
     [Fact]
     public void Chord_down_while_busy_is_ignored_and_flashes()
     {
-        var (m, _) = Create();
+        var m = Create();
         var flashes = 0;
         m.ChordDownIgnored += () => flashes++;
         m.Fire(DictationTrigger.ChordDown);
@@ -117,7 +139,7 @@ public class DictationStateMachineTests
     [Fact]
     public void Irrelevant_triggers_are_ignored_in_every_state()
     {
-        var (m, _) = Create();
+        var m = Create();
         foreach (var trigger in Enum.GetValues<DictationTrigger>())
         {
             if (trigger != DictationTrigger.ChordDown)
@@ -130,12 +152,16 @@ public class DictationStateMachineTests
         m.Fire(DictationTrigger.BeginReceived);
         Assert.Equal(DictationState.Recording, m.Fire(DictationTrigger.PostProcessed));
         Assert.Equal(DictationState.Recording, m.Fire(DictationTrigger.HandshakeComplete));
+
+        m.Fire(DictationTrigger.ChordUp);
+        Assert.Equal(DictationState.Finalising, m.Fire(DictationTrigger.Tap));
+        Assert.Equal(DictationState.Finalising, m.Fire(DictationTrigger.ChordUp));
     }
 
     [Fact]
     public void Copied_only_and_failed_leave_inserting()
     {
-        var (m, _) = Create();
+        var m = Create();
         m.Fire(DictationTrigger.ChordDown);
         m.Fire(DictationTrigger.BeginReceived);
         m.Fire(DictationTrigger.ChordUp);

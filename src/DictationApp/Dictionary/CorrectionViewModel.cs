@@ -60,6 +60,12 @@ public sealed partial class CorrectionViewModel : ObservableObject
     private void FindCorrections()
     {
         Candidates.Clear();
+        if (CorrectionDiffer.IsTooLong(OriginalText, EditedText))
+        {
+            Status = "The changes are too far apart to compare in one go. Correct a few nearby words, add them, then open Correct last dictation again for the rest.";
+            return;
+        }
+
         foreach (var c in CorrectionDiffer.Diff(OriginalText, EditedText))
         {
             var to = CorrectionDiffer.SuggestTerms([c]).FirstOrDefault();

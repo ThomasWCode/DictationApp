@@ -232,6 +232,13 @@ public sealed class SqliteHistoryRepository : IHistoryRepository, IDisposable
         return paths;
     }
 
+    public async Task<IReadOnlyList<string>> GetReferencedAudioPathsAsync(CancellationToken ct = default)
+    {
+        await InitialiseAsync(ct).ConfigureAwait(false);
+        await using var conn = await OpenAsync(ct).ConfigureAwait(false);
+        return await AudioPathsWhereAsync(conn, "audio_path IS NOT NULL", null, ct).ConfigureAwait(false);
+    }
+
     public async Task<IReadOnlyList<string>> DeleteAllAsync(CancellationToken ct = default)
     {
         await InitialiseAsync(ct).ConfigureAwait(false);

@@ -231,7 +231,7 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
             return;
         }
 
-        _logger.LogInformation("Microphone ready on {Device} ({Elapsed} ms)", fresh.Name, Environment.TickCount64 - started);
+        _logger.LogInformation("Microphone ready on {Device} ({Elapsed} ms){Fallback}", fresh.Name, Environment.TickCount64 - started, fresh.IsFallback ? "; the chosen microphone is not connected" : string.Empty);
     }
 
     /// <summary>Drops the prepared client (now, or when the current dictation releases it) and prepares a new one.</summary>
@@ -279,11 +279,17 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
     // IMMNotificationClient: called on COM threads, so each handler only records the change and returns.
     void IMMNotificationClient.OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
     {
-        if (flow == DataFlow.Capture && role == Role.Communications && _ready is { RequestedId: null })
+        if (flow == DataFlow.Capture && role == Role.Communications && _ready is { } ready && FollowsDefault(ready.RequestedId, ready.IsFallback))
         {
             Invalidate("default microphone changed");
         }
     }
+
+    /// <summary>
+    /// True for a prepared microphone that is the Windows default: none was chosen, or the chosen one is not connected
+    /// and the default stands in for it. Either must follow a change of the default.
+    /// </summary>
+    internal static bool FollowsDefault(string? requestedId, bool isFallback) => requestedId is null || isFallback;
 
     void IMMNotificationClient.OnDeviceStateChanged(string deviceId, DeviceState newState)
     {
@@ -294,6 +300,10 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
         else if (newState == DeviceState.Active && _ready is null)
         {
             PrepareInBackground();
+        }
+        else if (newState == DeviceState.Active && _ready is { IsFallback: true } fallback && string.Equals(fallback.RequestedId, deviceId, StringComparison.OrdinalIgnoreCase))
+        {
+            Invalidate("the chosen microphone is connected again");
         }
     }
 
@@ -314,12 +324,45 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
     }
 }
 
+/// <summary>Opens the chosen microphone, or the default communications one when it is not connected.</summary>
+public static class MicrophoneDevice
+{
+    /// <param name="fallback">True when <paramref name="requestedId"/> named a device that is not connected (unplugged,
+    /// disabled, another PC's) and the default communications microphone was opened instead.</param>
+    public static MMDevice Open(MMDeviceEnumerator enumerator, string? requestedId, out bool fallback)
+    {
+        fallback = false;
+        if (!string.IsNullOrEmpty(requestedId))
+        {
+            try
+            {
+                var device = enumerator.GetDevice(requestedId);
+                if (device.State == DeviceState.Active)
+                {
+                    return device;
+                }
+
+                device.Dispose();
+            }
+            catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException or ArgumentException)
+            {
+                // Not present on this PC.
+            }
+
+            fallback = true;
+        }
+
+        return enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications);
+    }
+}
+
 /// <summary>An initialised, stopped WASAPI capture client (shared mode, event driven, 20 ms buffer).</summary>
 public sealed class PreparedMicrophone : IDisposable
 {
-    private PreparedMicrophone(string? requestedId, MMDevice device, AudioClient client, AudioCaptureClient captureClient, EventWaitHandle bufferReady)
+    private PreparedMicrophone(string? requestedId, bool isFallback, MMDevice device, AudioClient client, AudioCaptureClient captureClient, EventWaitHandle bufferReady)
     {
         RequestedId = requestedId;
+        IsFallback = isFallback;
         Device = device;
         DeviceId = device.ID;
         Name = device.FriendlyName;
@@ -335,6 +378,9 @@ public sealed class PreparedMicrophone : IDisposable
 
     /// <summary>The device the settings asked for; null means the default communications device.</summary>
     public string? RequestedId { get; }
+
+    /// <summary>The chosen device was not connected, so this is the default communications microphone.</summary>
+    public bool IsFallback { get; }
 
     public string DeviceId { get; }
 
@@ -354,9 +400,7 @@ public sealed class PreparedMicrophone : IDisposable
     public static PreparedMicrophone Create(string? requestedId)
     {
         using var enumerator = new MMDeviceEnumerator();
-        var device = string.IsNullOrEmpty(requestedId)
-            ? enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Communications)
-            : enumerator.GetDevice(requestedId);
+        var device = MicrophoneDevice.Open(enumerator, requestedId, out var fallback);
         AudioClient? client = null;
         EventWaitHandle? bufferReady = null;
         try
@@ -365,7 +409,7 @@ public sealed class PreparedMicrophone : IDisposable
             client.Initialize(AudioClientShareMode.Shared, AudioClientStreamFlags.EventCallback, 200_000, 0, client.MixFormat, Guid.Empty);
             bufferReady = new EventWaitHandle(false, EventResetMode.AutoReset);
             client.SetEventHandle(bufferReady.SafeWaitHandle.DangerousGetHandle());
-            return new PreparedMicrophone(requestedId, device, client, client.AudioCaptureClient, bufferReady);
+            return new PreparedMicrophone(requestedId, fallback, device, client, client.AudioCaptureClient, bufferReady);
         }
         catch
         {

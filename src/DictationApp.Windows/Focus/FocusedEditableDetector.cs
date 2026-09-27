@@ -9,8 +9,8 @@ namespace DictationApp.Windows.Focus;
 /// <summary>
 /// Decides whether the focused control can take pasted text. Order: UI Automation focused element →
 /// caret presence via GetGUIThreadInfo → per-process allowlist → default editable. "Unknown" is treated
-/// as editable because a paste into a non-editable control is a harmless no-op and the text stays on the
-/// clipboard anyway.
+/// as editable because a paste into a non-editable control is a harmless no-op, and a paste the inserter cannot
+/// confirm afterwards (by reading the text before the caret) leaves the text on the clipboard as well.
 /// </summary>
 public sealed class FocusedEditableDetector : IDisposable
 {
@@ -50,7 +50,7 @@ public sealed class FocusedEditableDetector : IDisposable
         _logger = logger;
     }
 
-    public (bool Editable, string Reason) Detect(nint foregroundHwnd, uint threadId, string processName)
+    public (bool Editable, string Reason) Detect(uint threadId, string processName)
     {
         // 1. UI Automation, time-boxed: some apps stall UIA calls for seconds.
         var uia = RunWithBudget(() => ProbeUia(), UiaBudget);
@@ -70,12 +70,6 @@ public sealed class FocusedEditableDetector : IDisposable
         if (Allowlist.Contains(processName))
         {
             return (true, "allowlist");
-        }
-
-        // 4. The desktop / Explorer shell with nothing focused is the classic "no text box" case.
-        if (string.Equals(processName, "explorer", StringComparison.OrdinalIgnoreCase) && foregroundHwnd == 0)
-        {
-            return (false, "desktop");
         }
 
         return (true, "default");
@@ -101,8 +95,7 @@ public sealed class FocusedEditableDetector : IDisposable
     {
         try
         {
-            _automation ??= new UIA3Automation();
-            var focused = _automation.FocusedElement();
+            var focused = Automation().FocusedElement();
             if (focused is null || focused.Properties.IsPassword.ValueOrDefault)
             {
                 return null;
@@ -146,8 +139,7 @@ public sealed class FocusedEditableDetector : IDisposable
     {
         try
         {
-            _automation ??= new UIA3Automation();
-            var focused = _automation.FocusedElement();
+            var focused = Automation().FocusedElement();
             if (focused is null)
             {
                 return null;
@@ -183,18 +175,35 @@ public sealed class FocusedEditableDetector : IDisposable
         }
         catch (Exception ex)
         {
+            // Not disposed here: a probe that timed out earlier may still be using the shared automation object.
             _logger.LogDebug(ex, "UIA focus probe failed");
-            try
-            {
-                _automation?.Dispose();
-            }
-            catch (Exception)
-            {
-            }
-
-            _automation = null;
             return null;
         }
+    }
+
+    /// <summary>
+    /// The shared automation object, created on first use. Its UI Automation timeouts end a call into an app that hangs
+    /// after 2 s, so a probe that the caller stopped waiting for does not keep running (and piling up) for long.
+    /// </summary>
+    private UIA3Automation Automation()
+    {
+        if (_automation is { } existing)
+        {
+            return existing;
+        }
+
+        var automation = new UIA3Automation();
+        try
+        {
+            automation.ConnectionTimeout = TimeSpan.FromSeconds(2);
+            automation.TransactionTimeout = TimeSpan.FromSeconds(2);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "UI Automation timeouts not available");
+        }
+
+        return _automation = automation;
     }
 
     /// <summary>Empty apart from whitespace and invisible stand-ins such as a rich editor's empty paragraph.</summary>

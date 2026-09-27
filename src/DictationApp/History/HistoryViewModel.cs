@@ -17,10 +17,7 @@ public sealed partial class HistoryViewModel : ObservableObject
     private readonly IHistoryRepository _history;
     private readonly DictationOrchestrator _orchestrator;
     private readonly IClipboard _clipboard;
-    private readonly ITextInserter _inserter;
-    private readonly IForegroundContextProvider _foreground;
     private readonly WavPlayer _player;
-    private readonly ISettingsStore _settings;
     private readonly ILogger<HistoryViewModel> _logger;
 
     [ObservableProperty] private string _query = string.Empty;
@@ -34,19 +31,13 @@ public sealed partial class HistoryViewModel : ObservableObject
         IHistoryRepository history,
         DictationOrchestrator orchestrator,
         IClipboard clipboard,
-        ITextInserter inserter,
-        IForegroundContextProvider foreground,
         WavPlayer player,
-        ISettingsStore settings,
         ILogger<HistoryViewModel> logger)
     {
         _history = history;
         _orchestrator = orchestrator;
         _clipboard = clipboard;
-        _inserter = inserter;
-        _foreground = foreground;
         _player = player;
-        _settings = settings;
         _logger = logger;
         _player.PlaybackStopped += () => Application.Current?.Dispatcher.BeginInvoke(() => IsPlaying = false);
     }
@@ -146,21 +137,20 @@ public sealed partial class HistoryViewModel : ObservableObject
         await Task.Delay(350);
         try
         {
-            var target = _foreground.Capture();
-            if (target.IsEditable && !target.IsElevated)
+            // The same checks, spacing, paste keystroke and toasts as a live dictation; the result says what happened
+            // (the window is minimised, so the toasts carry the message).
+            var result = await _orchestrator.ReInsertAsync(text, CancellationToken.None);
+            Status = result.Outcome switch
             {
-                // The destination app's rule decides the paste keystroke, as for a live dictation.
-                await _inserter.InsertAsync(text, target, DictationOrchestrator.PasteModeFor(target, _settings.Current), CancellationToken.None);
-                Status = $"Re-inserted into {target.ProcessName}.";
-            }
-            else
-            {
-                await _clipboard.SetTextAsync(text);
-                Status = "No editable target; copied to clipboard.";
-            }
+                InsertionOutcome.Inserted when result.LeftOnClipboard => "Pasted; also on the clipboard, as the paste could not be confirmed.",
+                InsertionOutcome.Inserted => "Re-inserted.",
+                InsertionOutcome.CopiedOnly => (result.Reason ?? "Not inserted") + ".",
+                _ => "Re-insert failed: " + (result.Reason ?? "unknown error") + ". Use Copy.",
+            };
         }
         catch (Exception ex)
         {
+            _logger.LogWarning(ex, "Re-insert failed");
             Status = "Re-insert failed: " + ex.Message;
         }
     }
@@ -176,6 +166,7 @@ public sealed partial class HistoryViewModel : ObservableObject
         var record = Selected;
         _player.Stop();
         IsPlaying = false;
+        _orchestrator.CancelRetry(record.Id); // a Retry of it must not go on streaming and copying it
         await _history.DeleteAsync(record.Id);
         if (record.AudioPath is { } path)
         {
@@ -206,7 +197,10 @@ public sealed partial class HistoryViewModel : ObservableObject
         }
 
         IsBusy = true;
-        Status = "Re-streaming audio…";
+        var seconds = Math.Max(1, Selected.DurationMs / 1000);
+        Status = seconds >= 20
+            ? $"Re-streaming the recording; this takes about as long as it lasts ({seconds / 60} min {seconds % 60} s)…"
+            : "Re-streaming the recording…";
         try
         {
             var ok = await _orchestrator.RetryAsync(Selected.Id, CancellationToken.None);

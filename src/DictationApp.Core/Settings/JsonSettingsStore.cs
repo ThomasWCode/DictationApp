@@ -6,8 +6,8 @@ using Microsoft.Extensions.Logging;
 namespace DictationApp.Core.Settings;
 
 /// <summary>
-/// JSON file store with atomic writes (write to a temp file, then replace). A corrupt file is moved aside
-/// and defaults are used, so a bad edit never bricks the app.
+/// JSON file store with atomic, durable writes (write a temp file, flush it to the disk, then replace). A corrupt file
+/// is moved aside and defaults are used, so a bad edit never bricks the app.
 /// </summary>
 public sealed class JsonSettingsStore : ISettingsStore
 {
@@ -84,8 +84,15 @@ public sealed class JsonSettingsStore : ISettingsStore
         }
 
         var tmp = FilePath + ".tmp";
-        var json = JsonSerializer.Serialize(settings, Options);
-        await File.WriteAllTextAsync(tmp, json, ct).ConfigureAwait(false);
+        var json = JsonSerializer.SerializeToUtf8Bytes(settings, Options);
+
+        // Flushed to the disk before it replaces the old file: after a power cut or a crash the rename could otherwise
+        // reach the disk before the data, leaving an empty or partial settings.json (keys, dictionary and rules lost).
+        await using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous))
+        {
+            await stream.WriteAsync(json, ct).ConfigureAwait(false);
+            stream.Flush(flushToDisk: true);
+        }
 
         // Replacing a file that was written moments ago can be refused while another process (antivirus, the search
         // indexer) still has it open; saves in quick succession hit that, so retry briefly before giving up.
@@ -160,7 +167,23 @@ public sealed class JsonSettingsStore : ISettingsStore
             }
 
             using var raw = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
-            return Migrate(settings, raw.RootElement);
+            var loadedVersion = settings.SchemaVersion;
+            var migrated = Migrate(settings, raw.RootElement);
+            if (migrated.SchemaVersion != loadedVersion)
+            {
+                // Written back at once, like Android, rather than re-migrating the old file at every start until
+                // something else happens to save.
+                try
+                {
+                    WriteAsync(migrated, CancellationToken.None).GetAwaiter().GetResult();
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    _logger.LogWarning(ex, "Could not write the migrated settings back; they will be migrated again next time");
+                }
+            }
+
+            return migrated;
         }
         catch (Exception ex) when (ex is JsonException or IOException)
         {

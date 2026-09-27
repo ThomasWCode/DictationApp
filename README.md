@@ -27,9 +27,14 @@ and run it. It installs per-user into `%LOCALAPPDATA%\DictationApp`, starts the 
 it to start with Windows (Autostart is on by default and can be turned off in Settings › General). Updates are
 checked daily and from the tray menu; a newer release is downloaded at once and applied when you pick
 "Restart to update" or the next time the app starts. Settings and history live in
-`%LOCALAPPDATA%\ThomasWCode\DictationApp` and survive updates. While this repository is private the updater
-needs a GitHub token with read access to it (Settings › General). The executable is unsigned, so SmartScreen
-may show "More info → Run anyway" the first time.
+`%LOCALAPPDATA%\ThomasWCode\DictationApp` and survive updates. The repository is public, so the updater needs no
+token (the GitHub token in Settings › General is only for a private fork). The executable is unsigned, so
+SmartScreen may show "More info → Run anyway" the first time.
+
+To move to another PC, quit the app and copy `%LOCALAPPDATA%\ThomasWCode\DictationApp`. Keep the same Windows user
+folder path (otherwise History's recordings no longer match their records and are swept a day later), enter the
+API keys again (they are encrypted for this Windows user; setting `ASSEMBLYAI_API_KEY` and `GROQ_API_KEY` also
+works) and pick the microphone again.
 
 ## Build and run
 
@@ -80,6 +85,13 @@ update check uses. The executable is unsigned; SmartScreen will show "More info 
 src/DictationApp.Core      platform-independent: transcriber, state machine, cleanup, rules, history (net8.0)
 src/DictationApp.Windows   Win32/UIA/WASAPI/clipboard adapters (net8.0-windows)
 src/DictationApp           WPF tray app: Flow bar, Settings, History, first-run wizard (net8.0-windows)
-tests/                     xUnit: 154 Core + 21 Windows tests
+tests/                     xUnit: Core and Windows adapter tests
 build/                     icon generator, pack.ps1
 ```
+
+## Porting between the Windows and Android apps
+
+[DictationApp-Android](https://github.com/ThomasWCode/DictationApp-Android)'s `core/` is a line-by-line port of
+`DictationApp.Core`. A change to shared behaviour (session lifecycle, cleanup, retry, history, settings,
+formatting) is made in both repositories in the same round, each with its own regression test; a deliberate
+difference between the apps is recorded in both `docs/decisions.md` files.
