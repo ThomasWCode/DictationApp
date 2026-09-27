@@ -39,9 +39,10 @@ public sealed class HistoryRetentionService(HistoryMaintenance maintenance, INot
     {
         try
         {
-            // Recovery is marked done only once a pass succeeds: a database error leaves it for the next pass.
+            // Recovery is marked done only once a pass has checked every recording: a database error, or a file that
+            // could not be read, leaves it for the next pass.
             var pass = await maintenance.RunRetentionPassAsync(_recovered ? null : RunStartedAt(), ct);
-            _recovered = true;
+            _recovered = pass.RecoveryComplete;
             if (pass.Recovered > 0)
             {
                 notifier.Toast(
