@@ -10,6 +10,7 @@ public sealed class AppPaths
         HistoryDb = Path.Combine(root, "history.db");
         AudioDirectory = Path.Combine(root, "audio");
         LogDirectory = Path.Combine(root, "logs");
+        SweepCutoffFile = Path.Combine(root, "sweep-cutoff.txt");
     }
 
     /// <summary>
@@ -28,6 +29,12 @@ public sealed class AppPaths
     public string AudioDirectory { get; }
 
     public string LogDirectory { get; }
+
+    /// <summary>
+    /// When History was last found empty with recordings in the folder: the orphan sweep keeps every recording written
+    /// before it (see <c>HistoryMaintenance</c>).
+    /// </summary>
+    public string SweepCutoffFile { get; }
 
     public void EnsureDirectories()
     {
