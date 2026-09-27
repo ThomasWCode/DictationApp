@@ -8,15 +8,16 @@ namespace DictationApp.Windows.Insertion;
 
 /// <summary>
 /// Inserts text by pasting: snapshot clipboard → set our text → release held modifiers → bring the target to the
-/// front and check it is there → Ctrl+V (or Ctrl+Shift+V), checking Windows accepted every keystroke → wait for the
-/// target to read the clipboard → read back the characters before the caret → restore the snapshot. We never type
-/// character by character: paste is atomic, respects the target's own undo, and handles thousands of characters in
-/// one step.
+/// front and check it is there → read the characters before the caret → Ctrl+V (or Ctrl+Shift+V), checking Windows
+/// accepted every keystroke → wait for the target to read the clipboard → read the characters before the caret again
+/// → restore the snapshot. We never type character by character: paste is atomic, respects the target's own undo, and
+/// handles thousands of characters in one step.
 /// <para>
 /// Nothing is claimed that was not checked. When the target cannot be brought to the front or the keystrokes are
 /// refused, no paste is sent and the text stays on the clipboard (CopiedOnly). When the paste was sent but the
-/// characters before the caret cannot be read back or do not match (an app that exposes no text, a browser page with
-/// no field focused), the text is left on the clipboard as well instead of restoring the previous contents
+/// characters before the caret cannot be read, or did not change to end with the pasted text (an app that exposes no
+/// text, a browser page with no field focused, a field that ignored the paste), the text is left on the clipboard as
+/// well instead of restoring the previous contents
 /// (<see cref="InsertionResult.LeftOnClipboard"/>): unsure whether it landed, the user can still paste it. A restore
 /// that fails after a delivered paste does not turn it into a failure.
 /// </para>
@@ -85,6 +86,9 @@ public sealed class ClipboardPasteInserter : ITextInserter
         }
 
         await Task.Delay(30, ct).ConfigureAwait(false);
+        // The paste is confirmed only when this changes to end with the pasted text: text that already ends the same
+        // way must not pass for a paste the target ignored.
+        var beforePaste = _foreground.ReadTextBeforeCaret(target with { WindowHandle = expected });
         if (NativeMethods.GetForegroundWindow() != expected)
         {
             _logger.LogInformation("Focus left {Process} just before the paste; text left on the clipboard", app);
@@ -109,9 +113,10 @@ public sealed class ClipboardPasteInserter : ITextInserter
             }
 
             var readBack = _foreground.ReadTextBeforeCaret(target with { WindowHandle = expected });
-            if (!PasteVerification.LooksPasted(text, readBack))
+            if (!PasteVerification.LooksPasted(text, beforePaste, readBack))
             {
-                _logger.LogInformation("Paste into {Process} could not be confirmed ({ReadBack}); text left on the clipboard as well", app, readBack is null ? "not readable" : "text differs");
+                var why = beforePaste is null || readBack is null ? "not readable" : readBack == beforePaste ? "unchanged" : "text differs";
+                _logger.LogInformation("Paste into {Process} could not be confirmed ({ReadBack}); text left on the clipboard as well", app, why);
                 return new InsertionResult(InsertionOutcome.Inserted, $"Pasted into {app}; also on the clipboard, as the paste could not be confirmed", LeftOnClipboard: true);
             }
 
