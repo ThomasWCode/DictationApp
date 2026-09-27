@@ -166,6 +166,7 @@ public sealed partial class HistoryViewModel : ObservableObject
         var record = Selected;
         _player.Stop();
         IsPlaying = false;
+        _orchestrator.CancelRetry(record.Id); // a Retry of it must not go on streaming and copying it
         await _history.DeleteAsync(record.Id);
         if (record.AudioPath is { } path)
         {

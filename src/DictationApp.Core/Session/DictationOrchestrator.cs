@@ -33,6 +33,9 @@ public sealed class DictationOrchestrator : BackgroundService
     /// </summary>
     public const double RetryReplaySpeed = 1.0;
 
+    /// <summary>A window lookup normally takes tens of milliseconds; one that takes this long (a hung app) is given up.</summary>
+    public static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>Failure reason of a dictation that was still running when the app closed.</summary>
     public const string InterruptedReason = "Interrupted: DictationApp was closed during the dictation";
 
@@ -75,6 +78,8 @@ public sealed class DictationOrchestrator : BackgroundService
     // retry flashes busy, and a retry during a dictation is refused. Guards _session's start and _retrying.
     private readonly object _startLock = new();
     private bool _retrying;
+    private CancellationTokenSource? _retryCancel; // the running Retry's, so deleting its record can stop it
+    private long _retryRecordId;
     private DictationSession? _session;
     private Task? _sessionTask;
 
@@ -152,6 +157,7 @@ public sealed class DictationOrchestrator : BackgroundService
             return false;
         }
 
+        using var retryCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         string? busy = null;
         lock (_startLock)
         {
@@ -166,6 +172,10 @@ public sealed class DictationOrchestrator : BackgroundService
             else
             {
                 _retrying = true; // until this retry ends; closing History does not end it
+                // Registered with the reservation: CancelRetry (the record is being deleted) stops the retry however soon
+                // after the start it comes.
+                _retryCancel = retryCancel;
+                _retryRecordId = recordId;
             }
         }
 
@@ -175,17 +185,18 @@ public sealed class DictationOrchestrator : BackgroundService
             return false;
         }
 
+        var token = retryCancel.Token;
         try
         {
             var settings = _settings.Current;
-            var transcript = await TranscribeWavAsync(record.AudioPath, RetryReplaySpeed, null, ct).ConfigureAwait(false);
+            var transcript = await TranscribeWavAsync(record.AudioPath, RetryReplaySpeed, null, token).ConfigureAwait(false);
             record.CostEstimate = (record.CostEstimate ?? 0m) + CostEstimator.SttCost(settings.SpeechModel, BilledDuration(transcript.Termination, transcript.WallClock));
             record.UpdatedAt = _time.GetUtcNow();
             if (transcript.Termination is null)
             {
                 _logger.LogWarning("Retry of record {Id} ended without a Termination summary; keeping the earlier transcript", recordId);
                 record.FailureReason = "retry: the transcription did not finish";
-                await _history.UpdateAsync(record, ct).ConfigureAwait(false);
+                await _history.UpdateAsync(record, token).ConfigureAwait(false);
                 _notifier.Toast("Retry failed", "The transcription did not finish. The recording is kept; try Retry again.", ToastKind.Warning);
                 return false;
             }
@@ -193,18 +204,18 @@ public sealed class DictationOrchestrator : BackgroundService
             if (string.IsNullOrWhiteSpace(transcript.Text))
             {
                 record.FailureReason = "retry: nothing heard";
-                await _history.UpdateAsync(record, ct).ConfigureAwait(false);
+                await _history.UpdateAsync(record, token).ConfigureAwait(false);
                 _notifier.Toast("Retry", "Nothing was heard in the recording.", ToastKind.Warning);
                 return false;
             }
 
             var request = new PostProcessRequest(record.Level, record.Tone, KeytermsSelector.Select(settings.Dictionary), record.ProcessName ?? string.Empty, record.Url, null, PauseMarkedTranscript: transcript.PauseMarkedText);
-            var result = await _postProcessor.ProcessAsync(transcript.Text, request, ct).ConfigureAwait(false);
+            var result = await _postProcessor.ProcessAsync(transcript.Text, request, token).ConfigureAwait(false);
             ReportCleanupProblem(result);
-            await _clipboardGate.WaitAsync(ct).ConfigureAwait(false);
+            await _clipboardGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                await _clipboard.SetTextAsync(result.Text, ct).ConfigureAwait(false);
+                await _clipboard.SetTextAsync(result.Text, token).ConfigureAwait(false);
             }
             finally
             {
@@ -219,9 +230,14 @@ public sealed class DictationOrchestrator : BackgroundService
             record.FailureReason = result.Applied ? null : result.FailureReason;
             record.UpdatedAt = _time.GetUtcNow();
             record.CostEstimate += CostEstimator.LlmCost(result.Model, result.PromptTokens, result.CompletionTokens);
-            await _history.UpdateAsync(record, ct).ConfigureAwait(false);
+            await _history.UpdateAsync(record, token).ConfigureAwait(false);
             _notifier.Toast("Retry complete", "Text copied to the clipboard.", ToastKind.Success);
             return true;
+        }
+        catch (OperationCanceledException) when (retryCancel.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("Retry of record {Id} stopped: the dictation is being deleted", recordId);
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -236,7 +252,30 @@ public sealed class DictationOrchestrator : BackgroundService
             lock (_startLock)
             {
                 _retrying = false;
+                _retryCancel = null;
             }
+        }
+    }
+
+    /// <summary>
+    /// Stops a running Retry of <paramref name="recordId"/> (any Retry when null) before its record or recording is deleted:
+    /// otherwise it would keep streaming the deleted audio and then put the deleted dictation on the clipboard.
+    /// </summary>
+    public void CancelRetry(long? recordId = null)
+    {
+        CancellationTokenSource? cancel;
+        lock (_startLock)
+        {
+            cancel = _retrying && (recordId is null || recordId == _retryRecordId) ? _retryCancel : null;
+        }
+
+        try
+        {
+            cancel?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The retry finished meanwhile.
         }
     }
 
@@ -271,7 +310,16 @@ public sealed class DictationOrchestrator : BackgroundService
             connectCts.CancelAfter(ConnectTimeout + TimeSpan.FromSeconds(2));
             var options = BuildSessionOptions(settings);
             var sw = Stopwatch.StartNew();
-            await transcriber.ConnectAsync(options, connectCts.Token).ConfigureAwait(false);
+            try
+            {
+                await transcriber.ConnectAsync(options, connectCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // A failure Retry reports, as in a dictation; left as a cancellation it escaped Retry's handlers.
+                throw new TimeoutException("Connection timed out");
+            }
+
             capture.Start();
             var sender = SendFramesAsync(frames.Reader, transcriber, ct);
             await done.Task.WaitAsync(ct).ConfigureAwait(false);
@@ -559,13 +607,17 @@ public sealed class DictationOrchestrator : BackgroundService
             // 3. Where the user is: target window, editability, browser URL and app rule (tone and level). The lookup can
             // be slow (an app that answers UI Automation late), so a release, a discard or a fault meanwhile stops the
             // microphone at once rather than when the lookup returns: nothing said after the release is recorded.
+            // Bounded too: an app that never answers (hung) must not hold the session, and its microphone, before the
+            // duration cap is even running; the insertion looks at the window again anyway.
+            var deadline = Task.Delay(LookupTimeout, _time);
             var lookup = Task.Run(SafeCapture, CancellationToken.None);
-            if (await Task.WhenAny(lookup, session.Released, session.Escaped, session.Faulted).ConfigureAwait(false) != lookup)
+            var ended = await Task.WhenAny(lookup, deadline, session.Released, session.Escaped, session.Faulted).ConfigureAwait(false);
+            if (ended != lookup && ended != deadline)
             {
                 capture.Stop();
             }
 
-            session.Context = await lookup.ConfigureAwait(false);
+            session.Context = await Task.WhenAny(lookup, deadline).ConfigureAwait(false) == lookup ? await lookup.ConfigureAwait(false) : LookupTimedOut();
             session.Mark("lookup");
             // The bar already shows Listening, so an arrow key or chip may have changed the tone or level meanwhile:
             // that choice wins over the rule's, and is remembered now that it is known which rule it belongs to.
@@ -783,7 +835,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
             // 6. Inserting. Re-verify the foreground window; keep the tone chosen at the start.
             PublishSession(session, DictationState.Inserting, "Inserting");
-            var target = SafeCapture();
+            var target = await CaptureWithinAsync().ConfigureAwait(false);
             var pasteMode = session.Rule.PasteMode;
             if (target.WindowHandle == 0 || target.WindowHandle == session.Context.WindowHandle)
             {
@@ -1252,6 +1304,20 @@ public sealed class DictationOrchestrator : BackgroundService
             _logger.LogDebug(ex, "Reading the text before the caret failed");
             return null;
         }
+    }
+
+    /// <summary>The window in front now, or <see cref="ForegroundContext.Unknown"/> after <see cref="LookupTimeout"/>.</summary>
+    private async Task<ForegroundContext> CaptureWithinAsync()
+    {
+        var deadline = Task.Delay(LookupTimeout, _time);
+        var lookup = Task.Run(SafeCapture, CancellationToken.None);
+        return await Task.WhenAny(lookup, deadline).ConfigureAwait(false) == lookup ? await lookup.ConfigureAwait(false) : LookupTimedOut();
+    }
+
+    private ForegroundContext LookupTimedOut()
+    {
+        _logger.LogWarning("Window lookup took over {Seconds} s; going on without it", LookupTimeout.TotalSeconds);
+        return ForegroundContext.Unknown;
     }
 
     private ForegroundContext SafeCapture()

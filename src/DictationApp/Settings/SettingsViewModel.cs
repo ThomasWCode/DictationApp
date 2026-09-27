@@ -10,6 +10,7 @@ using DictationApp.Core.Dictionary;
 using DictationApp.Core.History;
 using DictationApp.Core.Rules;
 using DictationApp.Core.Settings;
+using DictationApp.Core.Session;
 using DictationApp.Windows.Audio;
 using DictationApp.Windows.Startup;
 using Microsoft.Extensions.Logging;
@@ -23,6 +24,7 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly IHttpClientFactory _http;
     private readonly IAudioCaptureFactory _captures;
     private readonly HistoryMaintenance _maintenance;
+    private readonly DictationOrchestrator _orchestrator;
     private readonly WavPlayer _player;
     private readonly Shell _shell;
     private readonly ILogger<SettingsViewModel> _logger;
@@ -86,10 +88,12 @@ public sealed partial class SettingsViewModel : ObservableObject
         IHttpClientFactory http,
         IAudioCaptureFactory captures,
         HistoryMaintenance maintenance,
+        DictationOrchestrator orchestrator,
         WavPlayer player,
         Shell shell,
         ILogger<SettingsViewModel> logger)
     {
+        _orchestrator = orchestrator;
         _store = store;
         _secrets = secrets;
         _http = http;
@@ -528,6 +532,7 @@ public sealed partial class SettingsViewModel : ObservableObject
         try
         {
             _player.Stop(); // a recording being played in History cannot be deleted
+            _orchestrator.CancelRetry(); // a running Retry must not stream and copy a deleted dictation
             var result = await _maintenance.DeleteAllAsync(CancellationToken.None);
             var kept = result.RecordingsKept + result.LogsKept;
             HistoryStatus = $"History cleared: {result.RecordingsRemoved} recordings and {result.LogsCleared} log files removed."
