@@ -234,6 +234,71 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_window_lookup_that_never_returns_does_not_hold_the_dictation()
+    {
+        // A hung app must not keep a dictation recording before its time limit is even running.
+        using var hung = new ManualResetEventSlim();
+        var lookups = 0;
+        _foreground.OnCapture = () =>
+        {
+            Interlocked.Increment(ref lookups);
+            hung.Wait(TimeSpan.FromSeconds(30));
+        };
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitFor(() => Volatile.Read(ref lookups) == 1, "the lookup started");
+        _clock.Advance(DictationOrchestrator.LookupTimeout);
+        _transcriber.CompleteConnect();
+        await WaitForState(DictationState.Recording);
+        _transcriber.RaiseTurn(0, "Still here.", endOfTurn: true, formatted: true);
+        _hotkey.ReleaseChord();
+        await WaitFor(() => Volatile.Read(ref lookups) == 2, "the insertion's lookup started");
+        _clock.Advance(DictationOrchestrator.LookupTimeout);
+        await WaitForIdleSession();
+        hung.Set();
+
+        Assert.Equal("Still here.", Assert.Single(_history.Records).RawTranscript);
+    }
+
+    [Fact]
+    public async Task Deleting_a_dictation_stops_its_retry()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        _transcriber.CompleteConnect();
+        _transcriber.OnConnected = () => _transcriber.RaiseTurn(0, "Deleted text.", endOfTurn: true, formatted: true);
+        _capture.CompleteOnStart = true;
+        _post.Gate = new TaskCompletionSource();
+        var retry = _orchestrator.RetryAsync(id, CancellationToken.None);
+        await WaitFor(() => _post.LastRequest is not null, "the retry is cleaning up");
+
+        _orchestrator.CancelRetry(id);
+
+        Assert.False(await retry.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Null(_clipboard.Text);
+        Assert.DoesNotContain(_notifier.Toasts, t => t.Title.StartsWith("Retry", StringComparison.Ordinal));
+        _post.Gate.SetResult();
+    }
+
+    [Fact]
+    public async Task A_retry_whose_connection_times_out_reports_a_failure()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        // What the connection's own time limit raises: a cancellation, though nobody cancelled the Retry.
+        _transcriber.FailConnect(new OperationCanceledException());
+
+        Assert.False(await _orchestrator.RetryAsync(id, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Contains(_notifier.Toasts, t => t.Title == "Retry failed");
+        Assert.Equal("retry: Connection timed out", (await _history.GetAsync(id, CancellationToken.None))!.FailureReason);
+    }
+
+    [Fact]
     public async Task A_press_while_a_retry_streams_flashes_busy_and_starts_nothing()
     {
         await StartAsync();
