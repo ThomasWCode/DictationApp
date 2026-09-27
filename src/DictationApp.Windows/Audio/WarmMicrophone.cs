@@ -279,11 +279,17 @@ public sealed class WarmMicrophone : IMMNotificationClient, IHostedService, IDis
     // IMMNotificationClient: called on COM threads, so each handler only records the change and returns.
     void IMMNotificationClient.OnDefaultDeviceChanged(DataFlow flow, Role role, string defaultDeviceId)
     {
-        if (flow == DataFlow.Capture && role == Role.Communications && _ready is { RequestedId: null })
+        if (flow == DataFlow.Capture && role == Role.Communications && _ready is { } ready && FollowsDefault(ready.RequestedId, ready.IsFallback))
         {
             Invalidate("default microphone changed");
         }
     }
+
+    /// <summary>
+    /// True for a prepared microphone that is the Windows default: none was chosen, or the chosen one is not connected
+    /// and the default stands in for it. Either must follow a change of the default.
+    /// </summary>
+    internal static bool FollowsDefault(string? requestedId, bool isFallback) => requestedId is null || isFallback;
 
     void IMMNotificationClient.OnDeviceStateChanged(string deviceId, DeviceState newState)
     {
