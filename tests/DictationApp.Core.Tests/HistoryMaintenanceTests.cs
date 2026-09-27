@@ -180,8 +180,24 @@ public sealed class HistoryMaintenanceTests : IDisposable
         await Assert.ThrowsAsync<InvalidOperationException>(() => failing.RecoverInterruptedAsync(runStart, CancellationToken.None));
         Assert.True(WavHeader.IsUnfinished(interrupted));
 
-        Assert.Equal(1, await _maintenance.RecoverInterruptedAsync(runStart, CancellationToken.None));
+        Assert.Equal(1, (await _maintenance.RecoverInterruptedAsync(runStart, CancellationToken.None)).Added);
         Assert.False(WavHeader.IsUnfinished(interrupted));
+        Assert.Equal(interrupted, Assert.Single(await _repo.SearchAsync(null)).AudioPath);
+    }
+
+    [Fact]
+    public async Task A_recording_that_cannot_be_read_is_tried_again_at_the_next_pass()
+    {
+        // A read error must not look like a finished file: recovery reports itself incomplete, so the next pass (not the
+        // next start) checks the recording again.
+        var runStart = Now.AddMinutes(-1);
+        var interrupted = Wav("20260926-100000-aaaaaaaa.wav", runStart.AddHours(-1), finished: false);
+        _maintenance.InspectUnfinished = _ => throw new IOException("too many open files");
+
+        Assert.Equal(new RetentionPass(Recovered: 0, RemovedFiles: 0, RecoveryComplete: false), await _maintenance.RunRetentionPassAsync(runStart, CancellationToken.None));
+
+        _maintenance.InspectUnfinished = path => WavHeader.IsUnfinished(path, out var pcm) ? pcm : null;
+        Assert.Equal(new RetentionPass(Recovered: 1, RemovedFiles: 0), await _maintenance.RunRetentionPassAsync(runStart, CancellationToken.None));
         Assert.Equal(interrupted, Assert.Single(await _repo.SearchAsync(null)).AudioPath);
     }
 
@@ -228,9 +244,9 @@ public sealed class HistoryMaintenanceTests : IDisposable
         var alreadyListed = Wav("20260926-102000-ffffffff.wav", runStart.AddHours(-1), finished: false);
         await Record(alreadyListed, new DateTimeOffset(2026, 9, 26, 10, 20, 0, TimeSpan.Zero));
 
-        var added = await _maintenance.RecoverInterruptedAsync(new DateTimeOffset(runStart, TimeSpan.Zero), CancellationToken.None);
+        var recovery = await _maintenance.RecoverInterruptedAsync(new DateTimeOffset(runStart, TimeSpan.Zero), CancellationToken.None);
 
-        Assert.Equal(1, added);
+        Assert.Equal(new RecoveryResult(Added: 1, Complete: true), recovery);
         var record = Assert.Single(await _repo.SearchAsync(null), r => r.AudioPath == interrupted);
         Assert.Equal(RecordStatus.Failed, record.Status);
         Assert.Equal(HistoryMaintenance.RecoveredReason, record.FailureReason);

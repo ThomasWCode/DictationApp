@@ -33,7 +33,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     public async Task<RetentionPass> RunRetentionPassAsync(DateTimeOffset? recoverFrom, CancellationToken ct)
     {
         var historyWasEmpty = (await history.GetStatsAsync(ct).ConfigureAwait(false)).Count == 0;
-        var recovered = recoverFrom is { } from ? await RecoverInterruptedAsync(from, ct).ConfigureAwait(false) : 0;
+        var recovery = recoverFrom is { } from ? await RecoverInterruptedAsync(from, ct).ConfigureAwait(false) : new RecoveryResult(0, Complete: true);
         var s = settings.Current;
         var now = time.GetUtcNow();
         var removed = 0;
@@ -48,7 +48,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
         }
 
         removed += await SweepOrphansAsync(ct, historyWasEmpty).ConfigureAwait(false);
-        return new RetentionPass(recovered, removed);
+        return new RetentionPass(recovery.Added, removed, recovery.Complete);
     }
 
     /// <summary>
@@ -126,11 +126,11 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     /// next pass recovers it instead of the sweep later taking it for a finished orphan. Returns the number of recordings
     /// added to History.
     /// </summary>
-    public async Task<int> RecoverInterruptedAsync(DateTimeOffset runStartedAt, CancellationToken ct)
+    public async Task<RecoveryResult> RecoverInterruptedAsync(DateTimeOffset runStartedAt, CancellationToken ct)
     {
         if (!Directory.Exists(paths.AudioDirectory))
         {
-            return 0;
+            return new RecoveryResult(0, Complete: true);
         }
 
         var s = settings.Current;
@@ -138,11 +138,12 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
         var keepFor = new[] { s.HistoryRetention.ToTimeSpan(), s.AudioRetention.ToTimeSpan() }.Where(t => t is not null).Select(t => t!.Value).DefaultIfEmpty(TimeSpan.MaxValue).Min();
         HashSet<string>? referenced = null;
         var added = 0;
+        var complete = true;
         foreach (var file in Directory.EnumerateFiles(paths.AudioDirectory, "*.wav"))
         {
             try
             {
-                if (File.GetLastWriteTimeUtc(file) >= runStartedAt.UtcDateTime || !WavHeader.IsUnfinished(file, out var pcmBytes))
+                if (File.GetLastWriteTimeUtc(file) >= runStartedAt.UtcDateTime || InspectUnfinished(file) is not { } pcmBytes)
                 {
                     continue;
                 }
@@ -183,12 +184,21 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                logger.LogDebug(ex, "Could not check {File} for recovery", Path.GetFileName(file));
+                // Not the same as a finished file: recovery is left incomplete, so the next pass (not the next start)
+                // checks this recording again.
+                complete = false;
+                logger.LogWarning(ex, "Could not check {File} for recovery; trying again at the next pass", Path.GetFileName(file));
             }
         }
 
-        return added;
+        return new RecoveryResult(added, complete);
     }
+
+    /// <summary>
+    /// The audio length of an unfinished recording, or null for any other file; throws when the file cannot be read.
+    /// Replaceable so tests can make a file fail to read on any OS.
+    /// </summary>
+    internal Func<string, long?> InspectUnfinished { get; set; } = path => WavHeader.IsUnfinished(path, out var pcm) ? pcm : null;
 
     /// <summary>The time in a recording's file name (yyyyMMdd-HHmmss, UTC), or null.</summary>
     internal static DateTimeOffset? RecordingTime(string file)
@@ -328,9 +338,14 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     }
 }
 
+/// <param name="Added">Interrupted recordings listed in History for Retry.</param>
+/// <param name="Complete">False when a recording could not be read: recovery should run again at a later pass.</param>
+public sealed record RecoveryResult(int Added, bool Complete);
+
 /// <param name="Recovered">Interrupted recordings listed in History for Retry.</param>
 /// <param name="RemovedFiles">Recordings deleted by the retention settings and the orphan sweep.</param>
-public sealed record RetentionPass(int Recovered, int RemovedFiles);
+/// <param name="RecoveryComplete">False when recovery could not read every recording (see <see cref="RecoveryResult"/>).</param>
+public sealed record RetentionPass(int Recovered, int RemovedFiles, bool RecoveryComplete = true);
 
 /// <param name="RecordingsRemoved">Recordings deleted, referenced by History or not.</param>
 /// <param name="RecordingsKept">Recordings in use (a dictation in progress, a file Windows would not release).</param>
