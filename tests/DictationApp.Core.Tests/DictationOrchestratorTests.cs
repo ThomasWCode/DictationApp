@@ -198,6 +198,67 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_dictation_that_fails_to_start_answers_the_press_before_its_idle()
+    {
+        // The hotkey service takes an Idle for a dictation's end only once that dictation has answered the press with
+        // Arming; a microphone that cannot open must still answer first, or a tap or double tap stays latched.
+        await StartAsync();
+        _capture.StartError = new InvalidOperationException("no microphone");
+        var seen = new ConcurrentQueue<DictationState>();
+        _hub.Changed += s => seen.Enqueue(s.State);
+
+        _hotkey.PressChord();
+        await WaitFor(() => seen.Contains(DictationState.Idle), "the failed start ended");
+
+        var states = seen.ToArray();
+        Assert.Equal(DictationState.Arming, states[0]);
+        Assert.Equal(DictationState.Idle, states[^1]);
+        Assert.Equal("Failed", _hub.Current.Badge);
+    }
+
+    [Fact]
+    public async Task A_release_during_a_slow_window_lookup_stops_the_microphone_at_once()
+    {
+        using var lookup = new ManualResetEventSlim();
+        _foreground.OnCapture = () => lookup.Wait(TimeSpan.FromSeconds(5));
+        await StartAsync();
+        _hotkey.PressChord();
+        await WaitFor(() => _capture.IsRunning, "microphone started");
+
+        _hotkey.ReleaseChord(ChordRelease.Hold);
+        await WaitFor(() => !_capture.IsRunning, "microphone stopped while the lookup is still running");
+
+        lookup.Set();
+        _transcriber.CompleteConnect();
+        await WaitForIdleSession();
+    }
+
+    [Fact]
+    public async Task A_press_while_a_retry_streams_flashes_busy_and_starts_nothing()
+    {
+        await StartAsync();
+        var wav = Path.Combine(_dir, "old.wav");
+        await File.WriteAllBytesAsync(wav, new byte[100]);
+        var id = await _history.InsertAsync(new DictationRecord { Status = RecordStatus.Failed, AudioPath = wav, CreatedAt = _clock.GetUtcNow(), UpdatedAt = _clock.GetUtcNow() });
+        _transcriber.CompleteConnect();
+        _transcriber.OnConnected = () => _transcriber.RaiseTurn(0, "Recovered text.", endOfTurn: true, formatted: true);
+        _capture.CompleteOnStart = true;
+        _post.Gate = new TaskCompletionSource();
+        var flashes = 0;
+        _hub.Flashed += () => Interlocked.Increment(ref flashes);
+
+        var retry = _orchestrator.RetryAsync(id, CancellationToken.None);
+        await WaitFor(() => _post.LastRequest is not null, "the retry is cleaning up");
+        _hotkey.PressChord();
+        await WaitFor(() => Volatile.Read(ref flashes) == 1, "busy flash");
+        Assert.Equal(DictationState.Idle, _orchestrator.State);
+
+        _post.Gate.SetResult();
+        Assert.True(await retry);
+        _hotkey.ReleaseChord();
+    }
+
+    [Fact]
     public async Task A_tap_being_cancelled_publishes_nothing_once_a_new_press_has_replaced_it()
     {
         // The hotkey service reads the status stream: the replaced session's level updates and closing Idle must not look
@@ -1016,11 +1077,19 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public bool CompleteOnStart { get; set; }
 
+        /// <summary>When set, Start throws it, like a microphone that cannot be opened.</summary>
+        public Exception? StartError { get; set; }
+
         /// <summary>When set, Stop delivers one last frame of this fill first, like the microphone's partial tail.</summary>
         public byte? FrameOnStop { get; set; }
 
         public void Start()
         {
+            if (StartError is { } error)
+            {
+                throw error;
+            }
+
             IsRunning = true;
             if (CompleteOnStart)
             {

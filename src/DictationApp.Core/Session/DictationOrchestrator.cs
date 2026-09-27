@@ -70,6 +70,11 @@ public sealed class DictationOrchestrator : BackgroundService
     // Clipboard writers take turns (a paste with its snapshot and restore, Re-insert, a Retry's copy), so one can never
     // restore the clipboard over another's text.
     private readonly SemaphoreSlim _clipboardGate = new(1, 1);
+
+    // A dictation and a Retry both stream to AssemblyAI and end on the clipboard: one at a time. A press during a
+    // retry flashes busy, and a retry during a dictation is refused. Guards _session's start and _retrying.
+    private readonly object _startLock = new();
+    private bool _retrying;
     private DictationSession? _session;
     private Task? _sessionTask;
 
@@ -147,9 +152,26 @@ public sealed class DictationOrchestrator : BackgroundService
             return false;
         }
 
-        if (!_machine.IsIdle)
+        string? busy = null;
+        lock (_startLock)
         {
-            _notifier.Toast("Retry", "Finish the current dictation first.", ToastKind.Warning);
+            if (_retrying)
+            {
+                busy = "A retry is already running.";
+            }
+            else if (!_machine.IsIdle || _session is not null)
+            {
+                busy = "Finish the current dictation first.";
+            }
+            else
+            {
+                _retrying = true; // until this retry ends; closing History does not end it
+            }
+        }
+
+        if (busy is not null)
+        {
+            _notifier.Toast("Retry", busy, ToastKind.Warning);
             return false;
         }
 
@@ -208,6 +230,13 @@ public sealed class DictationOrchestrator : BackgroundService
             await _history.UpdateAsync(record, CancellationToken.None).ConfigureAwait(false);
             _notifier.Toast("Retry failed", ex.Message, ToastKind.Error);
             return false;
+        }
+        finally
+        {
+            lock (_startLock)
+            {
+                _retrying = false;
+            }
         }
     }
 
@@ -326,42 +355,52 @@ public sealed class DictationOrchestrator : BackgroundService
         switch (ev.Kind)
         {
             case ControlKind.ChordDown:
-                if (_machine.IsIdle || _session is { ReleasedAsTap: true })
+                lock (_startLock)
                 {
-                    // A press that arrives while the previous session is being torn down (socket abort, WAV discard), or
-                    // while a tap is still being cancelled, chains behind it instead of flashing "busy".
-                    var previous = _sessionTask;
-                    var session = new DictationSession(_time.GetUtcNow());
-                    _session = session;
-                    _sessionTask = Task.Run(async () =>
+                    if (_retrying)
                     {
-                        if (previous is { IsCompleted: false })
+                        _hub.Flash(); // a Retry is streaming (see _startLock)
+                    }
+                    else if (_machine.IsIdle || _session is { ReleasedAsTap: true })
+                    {
+                        // A press that arrives while the previous session is being torn down (socket abort, WAV discard),
+                        // or while a tap is still being cancelled, chains behind it instead of flashing "busy".
+                        var previous = _sessionTask;
+                        var session = new DictationSession(_time.GetUtcNow());
+                        _session = session;
+                        _sessionTask = Task.Run(async () =>
                         {
-                            try
+                            if (previous is { IsCompleted: false })
                             {
-                                await previous.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                                try
+                                {
+                                    await previous.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                                }
+                                catch (Exception)
+                                {
+                                    // Previous session is stuck or faulted; start anyway.
+                                }
                             }
-                            catch (Exception)
-                            {
-                                // Previous session is stuck or faulted; start anyway.
-                            }
-                        }
 
-                        await RunSessionAsync(session, ct).ConfigureAwait(false);
-                    }, CancellationToken.None);
-                }
-                else
-                {
-                    _machine.Fire(DictationTrigger.ChordDown); // ignored + flash
+                            await RunSessionAsync(session, ct).ConfigureAwait(false);
+                        }, CancellationToken.None);
+                    }
+                    else
+                    {
+                        _machine.Fire(DictationTrigger.ChordDown); // ignored + flash
+                    }
                 }
 
                 break;
             case ControlKind.SimulatedStart:
-                if (_machine.IsIdle && (_sessionTask is null || _sessionTask.IsCompleted) && ev.WavPath is not null)
+                lock (_startLock)
                 {
-                    var simulated = new DictationSession(_time.GetUtcNow()) { SimulatedWavPath = ev.WavPath };
-                    _session = simulated;
-                    _sessionTask = Task.Run(() => RunSessionAsync(simulated, ct), CancellationToken.None);
+                    if (!_retrying && _machine.IsIdle && (_sessionTask is null || _sessionTask.IsCompleted) && ev.WavPath is not null)
+                    {
+                        var simulated = new DictationSession(_time.GetUtcNow()) { SimulatedWavPath = ev.WavPath };
+                        _session = simulated;
+                        _sessionTask = Task.Run(() => RunSessionAsync(simulated, ct), CancellationToken.None);
+                    }
                 }
 
                 break;
@@ -465,6 +504,13 @@ public sealed class DictationOrchestrator : BackgroundService
         var record = new DictationRecord { CreatedAt = session.StartedAt, UpdatedAt = session.StartedAt, Status = RecordStatus.Pending };
         try
         {
+            // The press is answered before anything that can fail: the hotkey service takes an Idle for this dictation's
+            // end only once it has answered, so a microphone that cannot open would otherwise leave a tap or a double tap
+            // latched (the next press then swallowed as a "stop").
+            session.Tone = settings.DefaultTone;
+            session.Level = settings.DefaultCleanupLevel;
+            PublishSession(session, DictationState.Arming, "Listening");
+
             // 1. Microphone first: anything said before it starts is lost. Frames buffer in the channel until the
             // socket is ready, and nothing here moves focus, so the window lookup below still sees the target.
             if (settings.StoreAudio)
@@ -494,9 +540,6 @@ public sealed class DictationOrchestrator : BackgroundService
             capture.Faulted += session.Fault;
             capture.Start();
             session.Mark("mic");
-            session.Tone = settings.DefaultTone;
-            session.Level = settings.DefaultCleanupLevel;
-            PublishSession(session, DictationState.Arming, "Listening");
 
             // 2. Socket: its ~0.8 s TLS and session setup overlaps the window lookup below.
             transcriber = _transcribers.Create();
@@ -513,8 +556,16 @@ public sealed class DictationOrchestrator : BackgroundService
             connectCts.CancelAfter(ConnectTimeout);
             var connectTask = transcriber.ConnectAsync(BuildSessionOptions(settings), connectCts.Token);
 
-            // 3. Where the user is: target window, editability, browser URL and app rule (tone and level).
-            session.Context = SafeCapture();
+            // 3. Where the user is: target window, editability, browser URL and app rule (tone and level). The lookup can
+            // be slow (an app that answers UI Automation late), so a release, a discard or a fault meanwhile stops the
+            // microphone at once rather than when the lookup returns: nothing said after the release is recorded.
+            var lookup = Task.Run(SafeCapture, CancellationToken.None);
+            if (await Task.WhenAny(lookup, session.Released, session.Escaped, session.Faulted).ConfigureAwait(false) != lookup)
+            {
+                capture.Stop();
+            }
+
+            session.Context = await lookup.ConfigureAwait(false);
             session.Mark("lookup");
             // The bar already shows Listening, so an arrow key or chip may have changed the tone or level meanwhile:
             // that choice wins over the rule's, and is remembered now that it is known which rule it belongs to.
