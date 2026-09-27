@@ -22,6 +22,12 @@ public interface IAudioCapture : IDisposable
 
     void Start();
 
+    /// <summary>
+    /// Stops capturing. A microphone delivers every remaining frame, including a last partial one (zero-padded to a
+    /// whole frame), through <see cref="FrameCaptured"/> before this returns, and no frame follows it: the caller relies
+    /// on this to end the recording exactly at the release and still keep its last syllable. A replay stopped early
+    /// simply ends (it flushes its tail itself when the file runs out, before <see cref="Completed"/>).
+    /// </summary>
     void Stop();
 }
 

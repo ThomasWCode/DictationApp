@@ -1,0 +1,435 @@
+using System.Globalization;
+using DictationApp.Core.Abstractions;
+using DictationApp.Core.Settings;
+using Microsoft.Extensions.Logging;
+
+namespace DictationApp.Core.History;
+
+/// <summary>
+/// Keeps the recordings folder and History consistent: the retention pass (startup and hourly) with its orphan sweep,
+/// "Delete all history", and the recovery of recordings an interrupted run left behind. Used by the retention service
+/// and by Settings. <paramref name="logFiles"/> closes the open log file while "Delete all" deletes the logs.
+/// </summary>
+public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStore settings, AppPaths paths, TimeProvider time, ILogger<HistoryMaintenance> logger, ILogFileControl? logFiles = null)
+{
+    /// <summary>The hourly sweep leaves recordings with no History record alone for this long.</summary>
+    public static readonly TimeSpan OrphanGrace = TimeSpan.FromDays(1);
+
+    /// <summary>"Delete all" spares a file written this recently: a dictation that is recording or being saved.</summary>
+    public static readonly TimeSpan ActiveRecordingGrace = TimeSpan.FromMinutes(1);
+
+    /// <summary>An interrupted recording shorter than this is dropped rather than recovered: nothing to retry.</summary>
+    public static readonly TimeSpan MinimumRecovered = TimeSpan.FromMilliseconds(300);
+
+    public const string RecoveredReason = "Interrupted: DictationApp stopped during this dictation (recovered at the next start)";
+
+    /// <summary>
+    /// One retention pass, at startup and hourly. The first pass of a run (<paramref name="recoverFrom"/> set to when the
+    /// run started) first lists recordings an earlier run left unfinished; then records past the history retention are
+    /// deleted, audio past the audio retention is removed, and orphaned recordings are swept. Whether History was empty
+    /// is judged before any of that: a lost or recreated database skips the sweep even once recovery has listed a
+    /// recording in it, and its recordings stay out of later sweeps. A database error ends the pass (the caller retries
+    /// recovery at the next pass).
+    /// </summary>
+    public async Task<RetentionPass> RunRetentionPassAsync(DateTimeOffset? recoverFrom, CancellationToken ct)
+    {
+        var historyWasEmpty = (await history.GetStatsAsync(ct).ConfigureAwait(false)).Count == 0;
+        var recovery = recoverFrom is { } from ? await RecoverInterruptedAsync(from, ct).ConfigureAwait(false) : new RecoveryResult(0, Complete: true);
+        var s = settings.Current;
+        var now = time.GetUtcNow();
+        var removed = 0;
+        if (s.HistoryRetention.ToTimeSpan() is { } keep)
+        {
+            removed += DeleteFiles(await history.DeleteOlderThanAsync(now - keep, ct).ConfigureAwait(false));
+        }
+
+        if (s.AudioRetention.ToTimeSpan() is { } keepAudio)
+        {
+            removed += DeleteFiles(await history.ClearAudioOlderThanAsync(now - keepAudio, ct).ConfigureAwait(false));
+        }
+
+        removed += await SweepOrphansAsync(ct, historyWasEmpty).ConfigureAwait(false);
+        return new RetentionPass(recovery.Added, removed, recovery.Complete);
+    }
+
+    /// <summary>
+    /// Deletes recordings no History record refers to, once older than <see cref="OrphanGrace"/>. The referenced set
+    /// comes from every record, not a page of the newest ones (with more than 5,000 records the audio of older ones was
+    /// deleted). An empty History (a lost or recreated database) skips the sweep rather than treat every recording as
+    /// an orphan, and the recordings found then are kept by later sweeps too (<see cref="KeepCurrentRecordings"/>);
+    /// "Delete all" empties the folder itself. <paramref name="historyWasEmpty"/> is that judgement made
+    /// before a retention pass changed anything (checked now when null). An unfinished recording is never swept: it is
+    /// one a failed save or an interrupted run left for recovery at the next start.
+    /// </summary>
+    public async Task<int> SweepOrphansAsync(CancellationToken ct, bool? historyWasEmpty = null)
+    {
+        if (!Directory.Exists(paths.AudioDirectory))
+        {
+            return 0;
+        }
+
+        HashSet<string> referenced;
+        try
+        {
+            if (historyWasEmpty ?? (await history.GetStatsAsync(ct).ConfigureAwait(false)).Count == 0)
+            {
+                KeepCurrentRecordings();
+                logger.LogDebug("History is empty; orphan sweep skipped");
+                return 0;
+            }
+
+            referenced = (await history.GetReferencedAudioPathsAsync(ct).ConfigureAwait(false)).Select(FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Could not list referenced audio; skipping orphan sweep");
+            return 0;
+        }
+
+        if (!TryReadSweepCutoff(out var keptBefore))
+        {
+            return 0;
+        }
+
+        return DeleteRecordings(referenced, time.GetUtcNow() - OrphanGrace, keepUnfinished: true, keptBefore).Deleted;
+    }
+
+    /// <summary>
+    /// History is empty, so no recording in the folder can be told from an orphan: a lost or recreated database leaves
+    /// every one of its recordings unreferenced. They are kept for good, not only while History stays empty (one new
+    /// record would let the next pass sweep them all): the time goes to <see cref="AppPaths.SweepCutoffFile"/>, and the
+    /// sweep leaves anything written before it. "Delete all" removes them, and the file.
+    /// </summary>
+    private void KeepCurrentRecordings()
+    {
+        try
+        {
+            if (!Directory.EnumerateFiles(paths.AudioDirectory, "*.wav").Any())
+            {
+                return;
+            }
+
+            var now = time.GetUtcNow();
+            if (TryReadSweepCutoff(out var saved) && saved >= now.UtcDateTime)
+            {
+                return;
+            }
+
+            File.WriteAllText(paths.SweepCutoffFile, now.ToString("O", CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Could not save which recordings the orphan sweep must keep");
+        }
+    }
+
+    /// <summary>
+    /// The time before which the sweep keeps every recording (null: none is kept that way). False when the saved time
+    /// cannot be read: the sweep then deletes nothing.
+    /// </summary>
+    private bool TryReadSweepCutoff(out DateTime? keptBeforeUtc)
+    {
+        keptBeforeUtc = null;
+        try
+        {
+            if (!File.Exists(paths.SweepCutoffFile))
+            {
+                return true;
+            }
+
+            if (DateTimeOffset.TryParse(File.ReadAllText(paths.SweepCutoffFile).Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var at))
+            {
+                keptBeforeUtc = at.UtcDateTime;
+                return true;
+            }
+
+            logger.LogWarning("The orphan sweep's cutoff could not be read; nothing is swept");
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "The orphan sweep's cutoff could not be read; nothing is swept");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// "Delete all history": every record, every recording in the folder (not only those History refers to, so orphans
+    /// left by a crash or a failed save go too) and the logs. A recording written within the last minute (a dictation
+    /// in progress) and files Windows will not let go of are kept and counted.
+    /// </summary>
+    public async Task<DeleteAllResult> DeleteAllAsync(CancellationToken ct)
+    {
+        var referenced = await history.DeleteAllAsync(ct).ConfigureAwait(false);
+        var removed = 0;
+        var kept = 0;
+        foreach (var file in referenced)
+        {
+            // Its record is gone, so the recording goes however recently it was saved; only playback or a retry can
+            // still hold it open.
+            switch (TryDelete(file, DateTime.MinValue, time.GetUtcNow()))
+            {
+                case DeleteOutcome.Deleted:
+                    removed++;
+                    break;
+                case DeleteOutcome.Kept:
+                    kept++;
+                    break;
+            }
+        }
+
+        var rest = DeleteRecordings(new HashSet<string>(StringComparer.OrdinalIgnoreCase), time.GetUtcNow() - ActiveRecordingGrace, keepUnfinished: false);
+        try
+        {
+            File.Delete(paths.SweepCutoffFile); // the recordings it kept are gone
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug(ex, "Could not delete the orphan sweep's cutoff");
+        }
+
+        var (logsRemoved, logsKept) = logFiles is null ? ClearLogs() : logFiles.WhileClosed(ClearLogs);
+        logger.LogInformation("Delete all: {Removed} recordings removed, {Kept} kept, {Logs} log files cleared, {LogsKept} not", removed + rest.Deleted, kept + rest.Kept, logsRemoved, logsKept);
+        return new DeleteAllResult(removed + rest.Deleted, kept + rest.Kept, logsRemoved, logsKept);
+    }
+
+    /// <summary>
+    /// Recordings a previous run left unfinished (killed, crashed or lost power while recording or before saving) are
+    /// repaired and listed in History as Failed, so Retry can transcribe them. Nothing is uploaded or pasted. Only files
+    /// last written before <paramref name="runStartedAt"/> are touched, never the file of a dictation now running. A
+    /// recording shorter than <see cref="MinimumRecovered"/>, or older than the retention settings keep, is deleted.
+    /// A file's sizes are written only once History lists it: a database error before that leaves it unfinished, so the
+    /// next pass recovers it instead of the sweep later taking it for a finished orphan. Returns the number of recordings
+    /// added to History.
+    /// </summary>
+    public async Task<RecoveryResult> RecoverInterruptedAsync(DateTimeOffset runStartedAt, CancellationToken ct)
+    {
+        if (!Directory.Exists(paths.AudioDirectory))
+        {
+            return new RecoveryResult(0, Complete: true);
+        }
+
+        var s = settings.Current;
+        var now = time.GetUtcNow();
+        var keepFor = new[] { s.HistoryRetention.ToTimeSpan(), s.AudioRetention.ToTimeSpan() }.Where(t => t is not null).Select(t => t!.Value).DefaultIfEmpty(TimeSpan.MaxValue).Min();
+        HashSet<string>? referenced = null;
+        var added = 0;
+        var complete = true;
+        foreach (var file in Directory.EnumerateFiles(paths.AudioDirectory, "*.wav"))
+        {
+            try
+            {
+                if (File.GetLastWriteTimeUtc(file) >= runStartedAt.UtcDateTime || InspectUnfinished(file) is not { } pcmBytes)
+                {
+                    continue;
+                }
+
+                var duration = TimeSpan.FromSeconds(pcmBytes / (double)WavHeader.BytesPerSecond);
+                var recordedAt = RecordingTime(file) ?? new DateTimeOffset(File.GetCreationTimeUtc(file), TimeSpan.Zero);
+                if (duration < MinimumRecovered || (keepFor != TimeSpan.MaxValue && recordedAt < now - keepFor))
+                {
+                    File.Delete(file);
+                    logger.LogInformation("Deleted an interrupted recording ({Seconds:0.0} s) that is too short or past retention", duration.TotalSeconds);
+                    continue;
+                }
+
+                referenced ??= (await history.GetReferencedAudioPathsAsync(ct).ConfigureAwait(false)).Select(FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (referenced.Contains(FullPath(file)))
+                {
+                    WavHeader.TryRepairUnfinished(file, out _);
+                    logger.LogInformation("Repaired an unfinished recording that History already lists ({Seconds:0.0} s)", duration.TotalSeconds);
+                    continue;
+                }
+
+                await history.InsertAsync(
+                    new DictationRecord
+                    {
+                        CreatedAt = recordedAt,
+                        UpdatedAt = now,
+                        Status = RecordStatus.Failed,
+                        FailureReason = RecoveredReason,
+                        AudioPath = file,
+                        DurationMs = (int)duration.TotalMilliseconds,
+                        Tone = s.DefaultTone,
+                        Level = s.DefaultCleanupLevel,
+                    },
+                    ct).ConfigureAwait(false);
+                added++;
+                WavHeader.TryRepairUnfinished(file, out _); // now that History lists it
+                logger.LogInformation("Recovered an interrupted recording ({Seconds:0.0} s) into History for Retry", duration.TotalSeconds);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Not the same as a finished file: recovery is left incomplete, so the next pass (not the next start)
+                // checks this recording again.
+                complete = false;
+                logger.LogWarning(ex, "Could not check {File} for recovery; trying again at the next pass", Path.GetFileName(file));
+            }
+        }
+
+        return new RecoveryResult(added, complete);
+    }
+
+    /// <summary>
+    /// The audio length of an unfinished recording, or null for any other file; throws when the file cannot be read.
+    /// Replaceable so tests can make a file fail to read on any OS.
+    /// </summary>
+    internal Func<string, long?> InspectUnfinished { get; set; } = path => WavHeader.IsUnfinished(path, out var pcm) ? pcm : null;
+
+    /// <summary>The time in a recording's file name (yyyyMMdd-HHmmss, UTC), or null.</summary>
+    internal static DateTimeOffset? RecordingTime(string file)
+    {
+        var name = Path.GetFileNameWithoutExtension(file);
+        return name.Length >= 15 && DateTimeOffset.TryParseExact(name[..15], "yyyyMMdd-HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at) ? at : null;
+    }
+
+    private static string FullPath(string path) => Path.GetFullPath(path);
+
+    private int DeleteFiles(IEnumerable<string> files)
+    {
+        var count = 0;
+        foreach (var file in files)
+        {
+            try
+            {
+                if (File.Exists(file))
+                {
+                    File.Delete(file);
+                    count++;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogDebug(ex, "Could not delete {File}", Path.GetFileName(file));
+            }
+        }
+
+        return count;
+    }
+
+    private (int Deleted, int Kept) DeleteRecordings(HashSet<string> referenced, DateTimeOffset olderThan, bool keepUnfinished, DateTime? keptBeforeUtc = null)
+    {
+        if (!Directory.Exists(paths.AudioDirectory))
+        {
+            return (0, 0);
+        }
+
+        var deleted = 0;
+        var kept = 0;
+        foreach (var file in Directory.EnumerateFiles(paths.AudioDirectory, "*.wav"))
+        {
+            if (referenced.Contains(FullPath(file)))
+            {
+                continue;
+            }
+
+            DateTime written;
+            try
+            {
+                written = File.GetLastWriteTimeUtc(file);
+                if (written < keptBeforeUtc)
+                {
+                    continue; // in the folder while History was empty (KeepCurrentRecordings)
+                }
+
+                if (keepUnfinished && WavHeader.IsUnfinished(file))
+                {
+                    continue;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                continue;
+            }
+
+            switch (TryDelete(file, written, olderThan))
+            {
+                case DeleteOutcome.Deleted:
+                    deleted++;
+                    break;
+                case DeleteOutcome.Kept:
+                    kept++;
+                    break;
+            }
+        }
+
+        return (deleted, kept);
+    }
+
+    private DeleteOutcome TryDelete(string file, DateTime writtenUtc, DateTimeOffset olderThan)
+    {
+        if (!File.Exists(file))
+        {
+            return DeleteOutcome.Gone;
+        }
+
+        if (writtenUtc >= olderThan.UtcDateTime)
+        {
+            return DeleteOutcome.Kept; // still being written or saved
+        }
+
+        try
+        {
+            File.Delete(file);
+            return DeleteOutcome.Deleted;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug(ex, "Could not delete {File}", Path.GetFileName(file));
+            return DeleteOutcome.Kept;
+        }
+    }
+
+    /// <summary>
+    /// Deletes every log file; the app closes the one its logger has open while this runs (<see cref="ILogFileControl"/>).
+    /// A file that cannot be deleted is kept and counted, never emptied: emptying a file a logger has open in append mode
+    /// makes that logger fail at every later write.
+    /// </summary>
+    private (int Cleared, int Kept) ClearLogs()
+    {
+        if (!Directory.Exists(paths.LogDirectory))
+        {
+            return (0, 0);
+        }
+
+        var cleared = 0;
+        var kept = 0;
+        foreach (var file in Directory.EnumerateFiles(paths.LogDirectory))
+        {
+            try
+            {
+                File.Delete(file);
+                cleared++;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                logger.LogDebug(ex, "Could not delete log {File}", Path.GetFileName(file));
+                kept++;
+            }
+        }
+
+        return (cleared, kept);
+    }
+
+    private enum DeleteOutcome
+    {
+        Deleted,
+        Kept,
+        Gone,
+    }
+}
+
+/// <param name="Added">Interrupted recordings listed in History for Retry.</param>
+/// <param name="Complete">False when a recording could not be read: recovery should run again at a later pass.</param>
+public sealed record RecoveryResult(int Added, bool Complete);
+
+/// <param name="Recovered">Interrupted recordings listed in History for Retry.</param>
+/// <param name="RemovedFiles">Recordings deleted by the retention settings and the orphan sweep.</param>
+/// <param name="RecoveryComplete">False when recovery could not read every recording (see <see cref="RecoveryResult"/>).</param>
+public sealed record RetentionPass(int Recovered, int RemovedFiles, bool RecoveryComplete = true);
+
+/// <param name="RecordingsRemoved">Recordings deleted, referenced by History or not.</param>
+/// <param name="RecordingsKept">Recordings in use (a dictation in progress, a file Windows would not release).</param>
+/// <param name="LogsCleared">Log files deleted.</param>
+/// <param name="LogsKept">Log files that could not be deleted.</param>
+public sealed record DeleteAllResult(int RecordingsRemoved, int RecordingsKept, int LogsCleared, int LogsKept);

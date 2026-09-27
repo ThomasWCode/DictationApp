@@ -10,6 +10,7 @@ using DictationApp.Core.Dictionary;
 using DictationApp.Core.History;
 using DictationApp.Core.Rules;
 using DictationApp.Core.Settings;
+using DictationApp.Core.Session;
 using DictationApp.Windows.Audio;
 using DictationApp.Windows.Startup;
 using Microsoft.Extensions.Logging;
@@ -22,9 +23,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     private readonly ISecretStore _secrets;
     private readonly IHttpClientFactory _http;
     private readonly IAudioCaptureFactory _captures;
-    private readonly IHistoryRepository _history;
+    private readonly HistoryMaintenance _maintenance;
+    private readonly DictationOrchestrator _orchestrator;
+    private readonly WavPlayer _player;
     private readonly Shell _shell;
     private readonly ILogger<SettingsViewModel> _logger;
+    private readonly SettingsEditTracker _edits = new();
     private IAudioCapture? _micTest;
 
     // General
@@ -83,20 +87,25 @@ public sealed partial class SettingsViewModel : ObservableObject
         ISecretStore secrets,
         IHttpClientFactory http,
         IAudioCaptureFactory captures,
-        IHistoryRepository history,
+        HistoryMaintenance maintenance,
+        DictationOrchestrator orchestrator,
+        WavPlayer player,
         Shell shell,
         ILogger<SettingsViewModel> logger)
     {
+        _orchestrator = orchestrator;
         _store = store;
         _secrets = secrets;
         _http = http;
         _captures = captures;
-        _history = history;
+        _maintenance = maintenance;
+        _player = player;
         _shell = shell;
         _logger = logger;
         Microphones = new ObservableCollection<AudioDeviceInfo>(AudioDeviceEnumerator.ListCaptureDevices());
         Microphones.Insert(0, new AudioDeviceInfo(string.Empty, "Default communications device", false));
         Load(store.Current);
+        _store.Changed += OnStoreChanged;
     }
 
     public event Action? RequestClose;
@@ -124,13 +133,13 @@ public sealed partial class SettingsViewModel : ObservableObject
     private void Load(AppSettings s)
     {
         FlowBarMode = s.FlowBarMode;
-        HasGitHubToken = s.HasGitHubToken;
+        HasGitHubToken = Decrypts(s.GitHubTokenProtected);
         Autostart = RunKeyAutostart.IsEnabled() || s.Autostart;
         CheckForUpdates = s.CheckForUpdates;
         MaxDictationMinutes = s.MaxDictationMinutes;
         LanguageCodes = s.LanguageCodes ?? string.Empty;
-        HasStoredKey = s.HasApiKey;
-        HasGroqKey = s.HasGroqKey;
+        HasStoredKey = Decrypts(s.ApiKeyProtected);
+        HasGroqKey = Decrypts(s.GroqApiKeyProtected);
         SpeechModel = s.SpeechModel;
         LlmBaseUrl = s.LlmBaseUrl;
         LlmModel = s.LlmModel;
@@ -156,7 +165,50 @@ public sealed partial class SettingsViewModel : ObservableObject
         {
             AppRules.Add(r.Clone());
         }
+
+        _edits.Reset(s, Dictionary, AppRules);
     }
+
+    /// <summary>
+    /// A stored key counts only when it can be decrypted: one protected for another Windows user or PC (a copied data
+    /// folder) is shown as missing, so it is entered again instead of failing at every dictation.
+    /// </summary>
+    private bool Decrypts(string? protectedValue) => !string.IsNullOrEmpty(protectedValue) && _secrets.Unprotect(protectedValue) is not null;
+
+    /// <summary>Stops following changes made elsewhere; called when the window closes.</summary>
+    public void Detach() => _store.Changed -= OnStoreChanged;
+
+    /// <summary>
+    /// Settings changed elsewhere while the window is open: "Correct last dictation" added terms, a remembered tone or
+    /// level changed the defaults, a dictation updated use counts. The window shows new terms, and new defaults where the
+    /// user has not changed them here, so it does not look as if a correction failed. Save merges either way.
+    /// </summary>
+    private void OnStoreChanged(AppSettings latest) => Application.Current?.Dispatcher.BeginInvoke(() =>
+    {
+        foreach (var term in latest.Dictionary)
+        {
+            if (Dictionary.Any(t => string.Equals(t.Term.Trim(), term.Term.Trim(), StringComparison.OrdinalIgnoreCase)) || _edits.Knows(term.Term))
+            {
+                continue;
+            }
+
+            var copy = term.Clone();
+            Dictionary.Insert(0, copy);
+            _edits.Track(copy);
+        }
+
+        if (DefaultTone == _edits.Tone)
+        {
+            DefaultTone = latest.DefaultTone;
+        }
+
+        if (DefaultCleanupLevel == _edits.Level)
+        {
+            DefaultCleanupLevel = latest.DefaultCleanupLevel;
+        }
+
+        _edits.TrackStyle(latest.DefaultTone, latest.DefaultCleanupLevel);
+    });
 
     [RelayCommand]
     private async Task SaveAsync()
@@ -172,6 +224,10 @@ public sealed partial class SettingsViewModel : ObservableObject
         var key = ApiKey.Trim();
         var groqKey = GroqApiKey.Trim();
         var gitHubToken = GitHubToken.Trim();
+
+        // Only what was changed here is merged into the latest settings: terms added by a correction, a remembered
+        // style change or updated use counts, made while this window was open, are kept.
+        var edits = _edits.Diff(DefaultTone, DefaultCleanupLevel, chord.ToString(), Dictionary.ToList(), AppRules.ToList());
         try
         {
             await _store.UpdateAsync(s =>
@@ -200,18 +256,14 @@ public sealed partial class SettingsViewModel : ObservableObject
                 s.LlmBaseUrl = string.IsNullOrWhiteSpace(LlmBaseUrl) ? AppSettings.DefaultLlmBaseUrl : LlmBaseUrl.Trim();
                 s.LlmModel = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
                 s.LlmFallbackModels = LlmFallbackModels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-                s.Hotkey = chord.ToString();
                 s.AcceptInjectedKeys = AcceptInjectedKeys;
                 s.MicrophoneDeviceId = string.IsNullOrEmpty(SelectedMicrophoneId) ? null : SelectedMicrophoneId;
-                s.DefaultTone = DefaultTone;
-                s.DefaultCleanupLevel = DefaultCleanupLevel;
                 s.RememberStyleChanges = RememberStyleChanges;
                 s.StoreAudio = StoreAudio;
                 s.KeepMicrophoneReady = KeepMicrophoneReady;
                 s.HistoryRetention = HistoryRetention;
                 s.AudioRetention = AudioRetention;
-                s.Dictionary = Dictionary.Where(t => !string.IsNullOrWhiteSpace(t.Term)).Select(t => t.Clone()).ToList();
-                s.AppRules = AppRules.Where(r => !string.IsNullOrWhiteSpace(r.ProcessGlob) || !string.IsNullOrWhiteSpace(r.UrlHost)).Select(r => r.Clone()).ToList();
+                edits.ApplyTo(s); // default tone and level, hotkey, dictionary terms and app rules
             });
 
             try
@@ -226,9 +278,9 @@ public sealed partial class SettingsViewModel : ObservableObject
             ApiKey = string.Empty;
             GroqApiKey = string.Empty;
             GitHubToken = string.Empty;
-            HasStoredKey = _store.Current.HasApiKey;
-            HasGroqKey = _store.Current.HasGroqKey;
-            HasGitHubToken = _store.Current.HasGitHubToken;
+            HasStoredKey = Decrypts(_store.Current.ApiKeyProtected);
+            HasGroqKey = Decrypts(_store.Current.GroqApiKeyProtected);
+            HasGitHubToken = Decrypts(_store.Current.GitHubTokenProtected);
             RequestClose?.Invoke();
         }
         catch (Exception ex)
@@ -297,7 +349,8 @@ public sealed partial class SettingsViewModel : ObservableObject
                 parts.Add(tokenResp.IsSuccessStatusCode ? "AssemblyAI: OK." : $"AssemblyAI: rejected (HTTP {(int)tokenResp.StatusCode}).");
             }
 
-            // 2. Groq: a two-token completion with the configured model proves key and model together.
+            // 2. Groq: a tiny completion with every model of the chain proves the key and each model together, so a
+            // fallback that would fail (retired, not allowed for the key) is found now rather than mid-dictation.
             if (groqKey.Length == 0)
             {
                 parts.Add("Groq: no key (cleanup levels fall back to raw text).");
@@ -305,28 +358,42 @@ public sealed partial class SettingsViewModel : ObservableObject
             else
             {
                 var baseUrl = string.IsNullOrWhiteSpace(LlmBaseUrl) ? AppSettings.DefaultLlmBaseUrl : LlmBaseUrl.Trim().TrimEnd('/') + "/";
-                var model = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
-                using var llmReq = new HttpRequestMessage(HttpMethod.Post, baseUrl + "chat/completions");
-                llmReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", groqKey);
-                var effort = Core.Cleanup.LlmPostProcessor.ReasoningEffortFor(model) is { } e ? ",\"reasoning_effort\":\"" + e + "\"" : string.Empty;
-                llmReq.Content = new StringContent("{\"model\":\"" + model + "\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"max_tokens\":8" + effort + "}", System.Text.Encoding.UTF8, "application/json");
-                using var llmResp = await client.SendAsync(llmReq);
-                if (llmResp.IsSuccessStatusCode)
+                var primary = string.IsNullOrWhiteSpace(LlmModel) ? AppSettings.DefaultLlmModel : LlmModel.Trim();
+                var chain = new[] { primary }
+                    .Concat(LlmFallbackModels.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var results = new List<string>();
+                foreach (var model in chain)
                 {
-                    parts.Add($"Groq: OK ({model}).");
-                }
-                else
-                {
+                    using var llmReq = new HttpRequestMessage(HttpMethod.Post, baseUrl + "chat/completions");
+                    llmReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", groqKey);
+                    var effort = Core.Cleanup.LlmPostProcessor.ReasoningEffortFor(model) is { } e ? ",\"reasoning_effort\":\"" + e + "\"" : string.Empty;
+                    llmReq.Content = new StringContent("{\"model\":" + System.Text.Json.JsonSerializer.Serialize(model) + ",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"max_tokens\":8" + effort + "}", System.Text.Encoding.UTF8, "application/json");
+                    using var llmResp = await client.SendAsync(llmReq);
+                    if (llmResp.IsSuccessStatusCode)
+                    {
+                        results.Add($"{model} OK");
+                        continue;
+                    }
+
                     var body = await llmResp.Content.ReadAsStringAsync();
                     var reason = (int)llmResp.StatusCode switch
                     {
                         401 => "key rejected",
-                        404 => "model not found; pick one from the free tier",
-                        429 => "rate limited right now (free tier); it will work again shortly",
-                        _ => $"HTTP {(int)llmResp.StatusCode}",
+                        403 => "this key may not use the model (allow it in the Groq console, or pick another)",
+                        404 => "model not found or retired; pick one from the free tier",
+                        429 => "rate limited (the free tier caps requests and tokens per minute and per day); try again later",
+                        _ => $"HTTP {(int)llmResp.StatusCode} {Truncate(body, 100)}",
                     };
-                    parts.Add($"Groq: {reason}. {Truncate(body, 120)}");
+                    results.Add($"{model}: {reason}");
+                    if (llmResp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                    {
+                        break; // the key itself is rejected: every other model would say the same
+                    }
                 }
+
+                parts.Add("Groq: " + string.Join("; ", results) + ".");
             }
 
             TestKeyStatus = string.Join(" ", parts);
@@ -450,37 +517,30 @@ public sealed partial class SettingsViewModel : ObservableObject
         AppRules.Clear();
     }
 
+    /// <summary>
+    /// Deletes everything History keeps: every record, every recording in the audio folder (including ones no record
+    /// refers to, left by a crash or a failed save) and the logs. A recording still being written is kept and counted.
+    /// </summary>
     [RelayCommand]
     private async Task DeleteAllHistoryAsync()
     {
-        if (MessageBox.Show("Delete every dictation and audio file? This cannot be undone.", "DictationApp", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        if (MessageBox.Show("Delete every dictation, every recording and the logs? This cannot be undone.", "DictationApp", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
         {
             return;
         }
 
         try
         {
-            var files = await _history.DeleteAllAsync();
-            var deleted = 0;
-            foreach (var f in files)
-            {
-                try
-                {
-                    if (System.IO.File.Exists(f))
-                    {
-                        System.IO.File.Delete(f);
-                        deleted++;
-                    }
-                }
-                catch (System.IO.IOException)
-                {
-                }
-            }
-
-            HistoryStatus = $"History cleared ({deleted} audio files removed).";
+            _player.Stop(); // a recording being played in History cannot be deleted
+            _orchestrator.CancelRetry(); // a running Retry must not stream and copy a deleted dictation
+            var result = await _maintenance.DeleteAllAsync(CancellationToken.None);
+            var kept = result.RecordingsKept + result.LogsKept;
+            HistoryStatus = $"History cleared: {result.RecordingsRemoved} recordings and {result.LogsCleared} log files removed."
+                + (kept > 0 ? $" {kept} files in use were kept." : string.Empty);
         }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Delete all history failed");
             HistoryStatus = "Could not clear history: " + ex.Message;
         }
     }

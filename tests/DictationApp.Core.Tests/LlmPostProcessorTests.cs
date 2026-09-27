@@ -30,15 +30,17 @@ public class LlmPostProcessorTests
         }
     }
 
-    private static HttpResponseMessage Ok(string content, int prompt = 100, int completion = 20) =>
+    private static HttpResponseMessage Ok(string content, int prompt = 100, int completion = 20, string? finish = null) =>
         new(HttpStatusCode.OK)
         {
             Content = new StringContent(JsonSerializer.Serialize(new
             {
-                choices = new[] { new { message = new { role = "assistant", content, reasoning = "thinking…" } } },
+                choices = new[] { new { message = new { role = "assistant", content, reasoning = "thinking…" }, finish_reason = finish } },
                 usage = new { prompt_tokens = prompt, completion_tokens = completion },
             }), Encoding.UTF8, "application/json"),
         };
+
+    private static HttpResponseMessage Error(HttpStatusCode status, string body) => new(status) { Content = new StringContent(body) };
 
     private static (LlmPostProcessor Processor, ScriptedHandler Handler, FakeTimeProvider Clock) Create(
         Script script,
@@ -165,6 +167,70 @@ public class LlmPostProcessorTests
         Assert.Equal("Raw.", result.Text);
         Assert.Single(handler.Calls);
         Assert.Contains("http-401", result.FailureReason);
+        Assert.Contains("key was rejected", result.ConfigurationProblem);
+    }
+
+    [Fact]
+    public async Task A_model_the_key_may_not_use_moves_to_the_next_and_is_reported()
+    {
+        // Groq answers 403 for a model blocked for this key or project; the key itself is fine.
+        var (p, handler, _) = Create((_, n, _) => Task.FromResult(n == 1 ? Error(HttpStatusCode.Forbidden, "{\"error\":{\"message\":\"model blocked\"}}") : Ok("Clean text here now.", finish: "stop")), model: "a", fallbacks: ["b"]);
+        var result = await p.ProcessAsync("some raw text here now", Request, CancellationToken.None);
+
+        Assert.True(result.Applied);
+        Assert.Equal("b", result.Model);
+        Assert.Equal(2, handler.Calls.Count);
+        Assert.Contains("may not use a", result.ConfigurationProblem);
+    }
+
+    [Fact]
+    public async Task A_retired_model_is_a_configuration_problem_but_a_rate_limit_is_not()
+    {
+        var (retired, _, _) = Create((_, n, _) => Task.FromResult(n == 1 ? Error(HttpStatusCode.BadRequest, "{\"error\":{\"code\":\"model_decommissioned\",\"message\":\"The model a has been decommissioned\"}}") : Ok("Clean text here now.")), model: "a", fallbacks: ["b"]);
+        Assert.Contains("a is not available", (await retired.ProcessAsync("some raw text here now", Request, CancellationToken.None)).ConfigurationProblem);
+
+        var (limited, _, _) = Create((_, n, _) => Task.FromResult(n == 1 ? Error((HttpStatusCode)429, "{\"error\":{\"message\":\"Rate limit reached\"}}") : Ok("Clean text here now.")), model: "a", fallbacks: ["b"]);
+        Assert.Null((await limited.ProcessAsync("some raw text here now", Request, CancellationToken.None)).ConfigurationProblem);
+    }
+
+    [Fact]
+    public async Task An_answer_cut_off_at_the_token_limit_is_not_used_and_the_next_model_is_tried()
+    {
+        // Half the text passes the length check, so only finish_reason shows it is incomplete.
+        const string raw = "please send the report to the team and do not publish it without approval";
+        var (p, handler, _) = Create(
+            (_, n, _) => Task.FromResult(n == 1
+                ? Ok("Please send the report to the team and", completion: 200, finish: "length")
+                : Ok("Please send the report to the team and do not publish it without approval.", finish: "stop")),
+            model: "a",
+            fallbacks: ["b"]);
+        var result = await p.ProcessAsync(raw, Request, CancellationToken.None);
+
+        Assert.True(result.Applied);
+        Assert.Equal("b", result.Model);
+        Assert.EndsWith("without approval.", result.Text);
+        Assert.Equal(2, handler.Calls.Count);
+    }
+
+    [Fact]
+    public async Task When_every_model_is_cut_off_the_raw_text_is_used_and_the_trail_kept()
+    {
+        var (p, _, _) = Create((_, _, _) => Task.FromResult(Ok("Some raw text", finish: "length")), model: "a", fallbacks: ["b"]);
+        var result = await p.ProcessAsync("some raw text here now", Request, CancellationToken.None);
+
+        Assert.False(result.Applied);
+        Assert.Equal("Some raw text here now", result.Text);
+        Assert.Equal("a:incomplete-length; b:incomplete-length", result.FailureReason);
+        Assert.Null(result.ConfigurationProblem);
+    }
+
+    [Fact]
+    public async Task A_filtered_answer_is_not_used_either()
+    {
+        var (p, _, _) = Create((_, n, _) => Task.FromResult(n == 1 ? Ok("Some raw text here now.", finish: "content_filter") : Ok("Some raw text here now.", finish: "stop")), model: "a", fallbacks: ["b"]);
+        var result = await p.ProcessAsync("some raw text here now", Request, CancellationToken.None);
+
+        Assert.Equal("b", result.Model);
     }
 
     [Fact]
@@ -186,7 +252,7 @@ public class LlmPostProcessorTests
 
         Assert.False(result.Applied);
         Assert.Equal("Hello\nWorld", result.Text);
-        Assert.Contains("HttpRequestException", result.FailureReason);
+        Assert.Equal("a:HttpRequestException; b:HttpRequestException", result.FailureReason);
     }
 
     [Fact]

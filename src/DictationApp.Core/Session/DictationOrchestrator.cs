@@ -26,6 +26,20 @@ public sealed class DictationOrchestrator : BackgroundService
     public const string MicrophonePrivacyUri = "ms-settings:privacy-microphone";
 
     /// <summary>
+    /// Replay pace for Retry: real time. AssemblyAI processes streamed audio at about 1.25x real time at most and then
+    /// ends the session with a short handshake, so the old 4x replay left the end of any recording longer than a few
+    /// seconds unprocessed and the retry came back silently cut off (and a recording over ~7 minutes could overflow
+    /// the server's 5-minute buffer). A retry therefore takes about as long as the recording.
+    /// </summary>
+    public const double RetryReplaySpeed = 1.0;
+
+    /// <summary>A window lookup normally takes tens of milliseconds; one that takes this long (a hung app) is given up.</summary>
+    public static readonly TimeSpan LookupTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>Failure reason of a dictation that was still running when the app closed.</summary>
+    public const string InterruptedReason = "Interrupted: DictationApp was closed during the dictation";
+
+    /// <summary>
     /// Silence before AssemblyAI may end a turn at terminal punctuation. Its default (100 ms) suits voice agents:
     /// a pause to think mid-sentence became a full stop and a new capitalised sentence. Dictation needs no early
     /// turn ends, because releasing the hotkey force-ends the last turn at once.
@@ -54,6 +68,18 @@ public sealed class DictationOrchestrator : BackgroundService
     private readonly DictationStateMachine _machine;
     private readonly Channel<ControlEvent> _events = Channel.CreateUnbounded<ControlEvent>(new UnboundedChannelOptions { SingleReader = true });
     private readonly SemaphoreSlim _replayGate = new(1, 1);
+    private readonly HashSet<string> _reportedCleanupProblems = [];
+
+    // Clipboard writers take turns (a paste with its snapshot and restore, Re-insert, a Retry's copy), so one can never
+    // restore the clipboard over another's text.
+    private readonly SemaphoreSlim _clipboardGate = new(1, 1);
+
+    // A dictation and a Retry both stream to AssemblyAI and end on the clipboard: one at a time. A press during a
+    // retry flashes busy, and a retry during a dictation is refused. Guards _session's start and _retrying.
+    private readonly object _startLock = new();
+    private bool _retrying;
+    private CancellationTokenSource? _retryCancel; // the running Retry's, so deleting its record can stop it
+    private long _retryRecordId;
     private DictationSession? _session;
     private Task? _sessionTask;
 
@@ -92,7 +118,7 @@ public sealed class DictationOrchestrator : BackgroundService
         _paths = paths;
         _logger = logger;
         _time = time ?? TimeProvider.System;
-        _machine = machine ?? new DictationStateMachine(_time);
+        _machine = machine ?? new DictationStateMachine();
         _machine.ChordDownIgnored += () => _hub.Flash();
         _machine.Transitioned += t => _logger.LogDebug("State {From} --{Trigger}--> {To}", t.From, t.Trigger, t.To);
     }
@@ -105,7 +131,8 @@ public sealed class DictationOrchestrator : BackgroundService
     /// <summary>Programmatic chord press (tray menu, tests).</summary>
     public void SimulateChordDown() => _events.Writer.TryWrite(new ControlEvent(ControlKind.ChordDown));
 
-    public void SimulateChordUp() => _events.Writer.TryWrite(new ControlEvent(ControlKind.ChordUp));
+    /// <summary>Programmatic release (tests); always a hold. The tray stops through the hotkey service.</summary>
+    public void SimulateChordUp() => _events.Writer.TryWrite(new ControlEvent(ControlKind.ChordUp, Release: ChordRelease.Hold));
 
     public void SimulateEscape() => _events.Writer.TryWrite(new ControlEvent(ControlKind.Escape));
 
@@ -116,8 +143,10 @@ public sealed class DictationOrchestrator : BackgroundService
     public void SimulateDictationFromWav(string wavPath) => _events.Writer.TryWrite(new ControlEvent(ControlKind.SimulatedStart, WavPath: wavPath));
 
     /// <summary>
-    /// Re-streams a stored WAV through the transcriber (4× real time), cleans it up and copies the result to
-    /// the clipboard. Used by "Retry" in History for Failed/Pending records.
+    /// Re-streams a stored WAV through the transcriber (at <see cref="RetryReplaySpeed"/>), cleans it up and copies the
+    /// result to the clipboard. Used by "Retry" in History for Failed/Pending records. A retry whose streaming session
+    /// ended without its Termination summary may be missing its end, so it counts as failed: the record keeps its
+    /// earlier words and stays retryable.
     /// </summary>
     public async Task<bool> RetryAsync(long recordId, CancellationToken ct)
     {
@@ -128,27 +157,71 @@ public sealed class DictationOrchestrator : BackgroundService
             return false;
         }
 
-        if (!_machine.IsIdle)
+        using var retryCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        string? busy = null;
+        lock (_startLock)
         {
-            _notifier.Toast("Retry", "Finish the current dictation first.", ToastKind.Warning);
+            if (_retrying)
+            {
+                busy = "A retry is already running.";
+            }
+            else if (!_machine.IsIdle || _session is not null)
+            {
+                busy = "Finish the current dictation first.";
+            }
+            else
+            {
+                _retrying = true; // until this retry ends; closing History does not end it
+                // Registered with the reservation: CancelRetry (the record is being deleted) stops the retry however soon
+                // after the start it comes.
+                _retryCancel = retryCancel;
+                _retryRecordId = recordId;
+            }
+        }
+
+        if (busy is not null)
+        {
+            _notifier.Toast("Retry", busy, ToastKind.Warning);
             return false;
         }
 
+        var token = retryCancel.Token;
         try
         {
             var settings = _settings.Current;
-            var transcript = await TranscribeWavAsync(record.AudioPath, 4.0, null, ct).ConfigureAwait(false);
+            var transcript = await TranscribeWavAsync(record.AudioPath, RetryReplaySpeed, null, token).ConfigureAwait(false);
+            record.CostEstimate = (record.CostEstimate ?? 0m) + CostEstimator.SttCost(settings.SpeechModel, BilledDuration(transcript.Termination, transcript.WallClock));
+            record.UpdatedAt = _time.GetUtcNow();
+            if (transcript.Termination is null)
+            {
+                _logger.LogWarning("Retry of record {Id} ended without a Termination summary; keeping the earlier transcript", recordId);
+                record.FailureReason = "retry: the transcription did not finish";
+                await _history.UpdateAsync(record, token).ConfigureAwait(false);
+                _notifier.Toast("Retry failed", "The transcription did not finish. The recording is kept; try Retry again.", ToastKind.Warning);
+                return false;
+            }
+
             if (string.IsNullOrWhiteSpace(transcript.Text))
             {
                 record.FailureReason = "retry: nothing heard";
-                await _history.UpdateAsync(record, ct).ConfigureAwait(false);
+                await _history.UpdateAsync(record, token).ConfigureAwait(false);
                 _notifier.Toast("Retry", "Nothing was heard in the recording.", ToastKind.Warning);
                 return false;
             }
 
             var request = new PostProcessRequest(record.Level, record.Tone, KeytermsSelector.Select(settings.Dictionary), record.ProcessName ?? string.Empty, record.Url, null, PauseMarkedTranscript: transcript.PauseMarkedText);
-            var result = await _postProcessor.ProcessAsync(transcript.Text, request, ct).ConfigureAwait(false);
-            await _clipboard.SetTextAsync(result.Text, ct).ConfigureAwait(false);
+            var result = await _postProcessor.ProcessAsync(transcript.Text, request, token).ConfigureAwait(false);
+            ReportCleanupProblem(result);
+            await _clipboardGate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                await _clipboard.SetTextAsync(result.Text, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _clipboardGate.Release();
+            }
+
             record.RawTranscript = transcript.Text;
             record.CleanedText = result.Applied ? result.Text : string.Empty;
             record.InsertedText = result.Text;
@@ -156,10 +229,15 @@ public sealed class DictationOrchestrator : BackgroundService
             record.Status = RecordStatus.CopiedOnly;
             record.FailureReason = result.Applied ? null : result.FailureReason;
             record.UpdatedAt = _time.GetUtcNow();
-            record.CostEstimate = (record.CostEstimate ?? 0m) + CostEstimator.SttCost(settings.SpeechModel, transcript.AudioDuration) + CostEstimator.LlmCost(result.Model, result.PromptTokens, result.CompletionTokens);
-            await _history.UpdateAsync(record, ct).ConfigureAwait(false);
+            record.CostEstimate += CostEstimator.LlmCost(result.Model, result.PromptTokens, result.CompletionTokens);
+            await _history.UpdateAsync(record, token).ConfigureAwait(false);
             _notifier.Toast("Retry complete", "Text copied to the clipboard.", ToastKind.Success);
             return true;
+        }
+        catch (OperationCanceledException) when (retryCancel.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            _logger.LogInformation("Retry of record {Id} stopped: the dictation is being deleted", recordId);
+            return false;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -168,6 +246,36 @@ public sealed class DictationOrchestrator : BackgroundService
             await _history.UpdateAsync(record, CancellationToken.None).ConfigureAwait(false);
             _notifier.Toast("Retry failed", ex.Message, ToastKind.Error);
             return false;
+        }
+        finally
+        {
+            lock (_startLock)
+            {
+                _retrying = false;
+                _retryCancel = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stops a running Retry of <paramref name="recordId"/> (any Retry when null) before its record or recording is deleted:
+    /// otherwise it would keep streaming the deleted audio and then put the deleted dictation on the clipboard.
+    /// </summary>
+    public void CancelRetry(long? recordId = null)
+    {
+        CancellationTokenSource? cancel;
+        lock (_startLock)
+        {
+            cancel = _retrying && (recordId is null || recordId == _retryRecordId) ? _retryCancel : null;
+        }
+
+        try
+        {
+            cancel?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The retry finished meanwhile.
         }
     }
 
@@ -202,7 +310,16 @@ public sealed class DictationOrchestrator : BackgroundService
             connectCts.CancelAfter(ConnectTimeout + TimeSpan.FromSeconds(2));
             var options = BuildSessionOptions(settings);
             var sw = Stopwatch.StartNew();
-            await transcriber.ConnectAsync(options, connectCts.Token).ConfigureAwait(false);
+            try
+            {
+                await transcriber.ConnectAsync(options, connectCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // A failure Retry reports, as in a dictation; left as a cancellation it escaped Retry's handlers.
+                throw new TimeoutException("Connection timed out");
+            }
+
             capture.Start();
             var sender = SendFramesAsync(frames.Reader, transcriber, ct);
             await done.Task.WaitAsync(ct).ConfigureAwait(false);
@@ -264,7 +381,9 @@ public sealed class DictationOrchestrator : BackgroundService
             _hotkeys.ArrowPressed -= OnArrow;
             _hub.ToneOverrideRequested -= OnToneOverride;
             _hub.LevelOverrideRequested -= OnLevelOverride;
-            _session?.Escape();
+
+            // Closing the app is not a discard: the running session sees the cancelled token and keeps what it has
+            // (a Failed record with its audio and the words heard, for Retry after the restart).
             if (_sessionTask is { } t)
             {
                 try
@@ -284,47 +403,57 @@ public sealed class DictationOrchestrator : BackgroundService
         switch (ev.Kind)
         {
             case ControlKind.ChordDown:
-                if (_machine.IsIdle)
+                lock (_startLock)
                 {
-                    // The second tap of a double tap arrives while the first tap's session is still being torn
-                    // down (socket abort, WAV discard). Chain behind it instead of flashing "busy".
-                    var previous = _sessionTask;
-                    var session = new DictationSession(_time.GetUtcNow());
-                    _session = session;
-                    _sessionTask = Task.Run(async () =>
+                    if (_retrying)
                     {
-                        if (previous is { IsCompleted: false })
+                        _hub.Flash(); // a Retry is streaming (see _startLock)
+                    }
+                    else if (_machine.IsIdle || _session is { ReleasedAsTap: true })
+                    {
+                        // A press that arrives while the previous session is being torn down (socket abort, WAV discard),
+                        // or while a tap is still being cancelled, chains behind it instead of flashing "busy".
+                        var previous = _sessionTask;
+                        var session = new DictationSession(_time.GetUtcNow());
+                        _session = session;
+                        _sessionTask = Task.Run(async () =>
                         {
-                            try
+                            if (previous is { IsCompleted: false })
                             {
-                                await previous.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                                try
+                                {
+                                    await previous.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+                                }
+                                catch (Exception)
+                                {
+                                    // Previous session is stuck or faulted; start anyway.
+                                }
                             }
-                            catch (Exception)
-                            {
-                                // Previous session is stuck or faulted; start anyway.
-                            }
-                        }
 
-                        await RunSessionAsync(session, ct).ConfigureAwait(false);
-                    }, CancellationToken.None);
-                }
-                else
-                {
-                    _machine.Fire(DictationTrigger.ChordDown); // ignored + flash
+                            await RunSessionAsync(session, ct).ConfigureAwait(false);
+                        }, CancellationToken.None);
+                    }
+                    else
+                    {
+                        _machine.Fire(DictationTrigger.ChordDown); // ignored + flash
+                    }
                 }
 
                 break;
             case ControlKind.SimulatedStart:
-                if (_machine.IsIdle && (_sessionTask is null || _sessionTask.IsCompleted) && ev.WavPath is not null)
+                lock (_startLock)
                 {
-                    var simulated = new DictationSession(_time.GetUtcNow()) { SimulatedWavPath = ev.WavPath };
-                    _session = simulated;
-                    _sessionTask = Task.Run(() => RunSessionAsync(simulated, ct), CancellationToken.None);
+                    if (!_retrying && _machine.IsIdle && (_sessionTask is null || _sessionTask.IsCompleted) && ev.WavPath is not null)
+                    {
+                        var simulated = new DictationSession(_time.GetUtcNow()) { SimulatedWavPath = ev.WavPath };
+                        _session = simulated;
+                        _sessionTask = Task.Run(() => RunSessionAsync(simulated, ct), CancellationToken.None);
+                    }
                 }
 
                 break;
             case ControlKind.ChordUp:
-                _session?.Release();
+                _session?.Release(ev.Release == ChordRelease.Tap);
                 break;
             case ControlKind.Escape:
                 _session?.Escape();
@@ -404,6 +533,17 @@ public sealed class DictationOrchestrator : BackgroundService
 
     private async Task RunSessionAsync(DictationSession session, CancellationToken ct)
     {
+        if (ct.IsCancellationRequested || _machine.Fire(DictationTrigger.ChordDown) != DictationState.Arming)
+        {
+            // The app is closing, or a chained press found the previous session still running after the wait.
+            if (ReferenceEquals(_session, session))
+            {
+                _session = null;
+            }
+
+            return;
+        }
+
         var settings = _settings.Current;
         IAudioCapture? capture = null;
         IAudioSink? sink = null;
@@ -412,7 +552,12 @@ public sealed class DictationOrchestrator : BackgroundService
         var record = new DictationRecord { CreatedAt = session.StartedAt, UpdatedAt = session.StartedAt, Status = RecordStatus.Pending };
         try
         {
-            _machine.Fire(DictationTrigger.ChordDown);
+            // The press is answered before anything that can fail: the hotkey service takes an Idle for this dictation's
+            // end only once it has answered, so a microphone that cannot open would otherwise leave a tap or a double tap
+            // latched (the next press then swallowed as a "stop").
+            session.Tone = settings.DefaultTone;
+            session.Level = settings.DefaultCleanupLevel;
+            PublishSession(session, DictationState.Arming, "Listening");
 
             // 1. Microphone first: anything said before it starts is lost. Frames buffer in the channel until the
             // socket is ready, and nothing here moves focus, so the window lookup below still sees the target.
@@ -426,7 +571,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 : _captures.CreateWavReplay(session.SimulatedWavPath, 1.0);
             if (session.SimulatedWavPath is not null)
             {
-                capture.Completed += session.Release;
+                capture.Completed += () => session.Release();
             }
 
             capture.FrameCaptured += frame =>
@@ -435,20 +580,21 @@ public sealed class DictationOrchestrator : BackgroundService
                 sink?.Write(copy.Pcm16.Span);
                 session.Frames.Writer.TryWrite(copy);
                 session.OnFrame(copy);
-                _hub.Update(s => s with { Level = copy.Peak });
+                if (Publishes(session))
+                {
+                    _hub.Update(s => s with { Level = copy.Peak });
+                }
             };
             capture.Faulted += session.Fault;
             capture.Start();
-            session.Tone = settings.DefaultTone;
-            session.Level = settings.DefaultCleanupLevel;
-            PublishSession(session, DictationState.Arming, "Listening");
+            session.Mark("mic");
 
             // 2. Socket: its ~0.8 s TLS and session setup overlaps the window lookup below.
             transcriber = _transcribers.Create();
             session.AttachTranscriber(transcriber);
             transcriber.TurnReceived += turn =>
             {
-                if (session.Assembler.Ingest(turn))
+                if (session.Assembler.Ingest(turn) && Publishes(session))
                 {
                     _hub.Update(s => s with { LiveText = session.Assembler.LiveText });
                 }
@@ -458,8 +604,21 @@ public sealed class DictationOrchestrator : BackgroundService
             connectCts.CancelAfter(ConnectTimeout);
             var connectTask = transcriber.ConnectAsync(BuildSessionOptions(settings), connectCts.Token);
 
-            // 3. Where the user is: target window, editability, browser URL and app rule (tone and level).
-            session.Context = SafeCapture();
+            // 3. Where the user is: target window, editability, browser URL and app rule (tone and level). The lookup can
+            // be slow (an app that answers UI Automation late), so a release, a discard or a fault meanwhile stops the
+            // microphone at once rather than when the lookup returns: nothing said after the release is recorded.
+            // Bounded too: an app that never answers (hung) must not hold the session, and its microphone, before the
+            // duration cap is even running; the insertion looks at the window again anyway.
+            var deadline = Task.Delay(LookupTimeout, _time);
+            var lookup = Task.Run(SafeCapture, CancellationToken.None);
+            var ended = await Task.WhenAny(lookup, deadline, session.Released, session.Escaped, session.Faulted).ConfigureAwait(false);
+            if (ended != lookup && ended != deadline)
+            {
+                capture.Stop();
+            }
+
+            session.Context = await Task.WhenAny(lookup, deadline).ConfigureAwait(false) == lookup ? await lookup.ConfigureAwait(false) : LookupTimedOut();
+            session.Mark("lookup");
             // The bar already shows Listening, so an arrow key or chip may have changed the tone or level meanwhile:
             // that choice wins over the rule's, and is remembered now that it is known which rule it belongs to.
             var rule = AppRulesResolver.Resolve(session.Context, settings.AppRules, settings.DefaultTone, settings.DefaultCleanupLevel, settings.PasteMode);
@@ -494,12 +653,15 @@ public sealed class DictationOrchestrator : BackgroundService
             var silentMicTask = WatchForSilentMicrophoneAsync(session, ct);
 
             var first = await Task.WhenAny(connectTask, session.Released, session.Escaped, session.Faulted).ConfigureAwait(false);
-            if (first == session.Escaped)
+
+            // A discard wins over a release that arrived with it (Escape, then letting go, during a slow start).
+            if (session.Escaped.IsCompleted)
             {
                 await DiscardAsync(session, capture, sink, transcriber, "Discarded").ConfigureAwait(false);
                 return;
             }
 
+            ct.ThrowIfCancellationRequested(); // the app is closing: kept as an interrupted dictation below
             if (first == session.Faulted)
             {
                 await FailAsync(session, record, capture, sink, transcriber, session.Faulted.Result, ct).ConfigureAwait(false);
@@ -508,15 +670,21 @@ public sealed class DictationOrchestrator : BackgroundService
 
             if (first == session.Released)
             {
-                var next = _machine.Fire(DictationTrigger.ChordUp);
-                if (next == DictationState.Idle)
+                if (session.ReleasedAsTap)
                 {
-                    _logger.LogInformation("Short tap ({Held} ms): cancelled before billing", (int)(_time.GetUtcNow() - session.StartedAt).TotalMilliseconds);
+                    _machine.Fire(DictationTrigger.Tap);
+                    _logger.LogInformation("Short tap: cancelled before the streaming session began");
                     await DiscardAsync(session, capture, sink, transcriber, null).ConfigureAwait(false);
                     return;
                 }
 
-                // Released after a real hold but before Begin: give the connection its remaining budget.
+                // Released after a real hold but before Begin. The release ends the recording: stop the microphone now
+                // (its last partial frame is delivered by Stop), then give the connection its remaining budget and
+                // send what was recorded. Nothing said after the release is recorded or uploaded.
+                session.Mark("release");
+                _machine.Fire(DictationTrigger.ChordUp);
+                capture.Stop();
+                session.Frames.Writer.TryComplete();
                 PublishSession(session, DictationState.Finalising, "Connecting");
                 try
                 {
@@ -524,13 +692,13 @@ public sealed class DictationOrchestrator : BackgroundService
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException || connectCts.IsCancellationRequested)
                 {
+                    ct.ThrowIfCancellationRequested();
                     _machine.Fire(DictationTrigger.Failed);
                     await FailAsync(session, record, capture, sink, transcriber, ex is OperationCanceledException ? new TimeoutException("Connection timed out") : ex, ct).ConfigureAwait(false);
                     return;
                 }
 
-                capture.Stop();
-                session.Frames.Writer.TryComplete();
+                session.Mark("begin");
                 await SendFramesAsync(session.Frames.Reader, transcriber, ct).ConfigureAwait(false);
             }
             else
@@ -542,12 +710,14 @@ public sealed class DictationOrchestrator : BackgroundService
                 }
                 catch (Exception ex)
                 {
+                    ct.ThrowIfCancellationRequested();
                     _machine.Fire(ex is OperationCanceledException ? DictationTrigger.ConnectTimeout : DictationTrigger.SocketFault);
                     await FailAsync(session, record, capture, sink, transcriber, ex is OperationCanceledException ? new TimeoutException("Connection timed out") : ex, ct).ConfigureAwait(false);
                     return;
                 }
 
                 _machine.Fire(DictationTrigger.BeginReceived);
+                session.Mark("begin");
                 _logger.LogInformation("Connect latency {Latency} ms", transcriber.ConnectLatency?.TotalMilliseconds ?? -1);
                 PublishSession(session, DictationState.Recording, null);
                 sender = SendFramesAsync(session.Frames.Reader, transcriber, ct);
@@ -556,12 +726,15 @@ public sealed class DictationOrchestrator : BackgroundService
                 var capTask = Task.Delay(settings.MaxDictationDuration, _time, capCts.Token);
                 var end = await Task.WhenAny(session.Released, session.Escaped, session.Faulted, capTask).ConfigureAwait(false);
                 capCts.Cancel();
-                if (end == session.Escaped)
+                session.Mark("release");
+                if (session.Escaped.IsCompleted)
                 {
                     await DiscardAsync(session, capture, sink, transcriber, "Discarded").ConfigureAwait(false);
                     return;
                 }
 
+                // The cap task is linked to the app's token, so closing the app lands here too: not the time limit.
+                ct.ThrowIfCancellationRequested();
                 if (end == session.Faulted)
                 {
                     _machine.Fire(DictationTrigger.SocketFault);
@@ -573,6 +746,14 @@ public sealed class DictationOrchestrator : BackgroundService
                 {
                     _machine.Fire(DictationTrigger.CapReached);
                     _notifier.Toast("Dictation limit", $"Stopped after {settings.MaxDictationMinutes} minutes.", ToastKind.Info);
+                }
+                else if (session.ReleasedAsTap)
+                {
+                    // The streaming session began before a lone tap was reported: still a tap, still cancelled.
+                    _machine.Fire(DictationTrigger.Tap);
+                    _logger.LogInformation("Short tap: cancelled just after the streaming session began");
+                    await DiscardAsync(session, capture, sink, transcriber, null).ConfigureAwait(false);
+                    return;
                 }
                 else
                 {
@@ -594,6 +775,12 @@ public sealed class DictationOrchestrator : BackgroundService
             // 4. Finalising: graceful handshake bounded by the hard cap.
             PublishSession(session, DictationState.Finalising, "Finishing");
             var termination = await transcriber.ShutdownAsync(HandshakeCap, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested(); // shutdown treats the app closing like its time cap and returns null
+            session.Mark("handshake");
+            if (termination is null && !session.Faulted.IsCompleted)
+            {
+                _logger.LogWarning("No Termination summary from the streaming session; the transcript may be missing its last words");
+            }
 
             // A socket fault after the release is no longer being awaited; without a Termination summary the
             // transcript may be missing its tail, so save it as Failed (audio kept for Retry) rather than paste it.
@@ -604,7 +791,7 @@ public sealed class DictationOrchestrator : BackgroundService
             }
             var audioSeconds = termination?.AudioDurationSeconds ?? session.AudioDuration.TotalSeconds;
             record.DurationMs = (int)(session.AudioDuration.TotalMilliseconds);
-            record.CostEstimate = CostEstimator.SttCost(settings.SpeechModel, TimeSpan.FromSeconds(audioSeconds));
+            record.CostEstimate = CostEstimator.SttCost(settings.SpeechModel, BilledDuration(termination, TimeSpan.FromSeconds(audioSeconds)));
             var rawText = session.Assembler.FinalText;
             record.RawTranscript = rawText;
             if (!session.Assembler.HasOpenTurn && session.Assembler.ClosedText != rawText)
@@ -612,19 +799,18 @@ public sealed class DictationOrchestrator : BackgroundService
                 _logger.LogInformation("Trailing partial included in final text");
             }
 
-            if (sink is not null)
-            {
-                sink.Complete();
-                record.AudioPath = sink.Path;
-            }
+            // The recording is finished (Complete) only once its record is saved: until then its header keeps the
+            // "unfinished" marker, so a crash or kill during cleanup or insertion leaves a file the next start
+            // recovers into History instead of an orphan the sweep deletes.
+            record.AudioPath = sink?.Path;
 
             if (string.IsNullOrWhiteSpace(rawText))
             {
                 _machine.Fire(DictationTrigger.NothingHeard);
                 sink?.Discard();
                 record.AudioPath = null;
-                _logger.LogInformation("Nothing heard");
-                PublishIdle("Nothing heard");
+                _logger.LogInformation("Nothing heard (ms since the press: {Timings})", session.Timings());
+                PublishIdle(session, "Nothing heard");
                 return;
             }
 
@@ -637,6 +823,9 @@ public sealed class DictationOrchestrator : BackgroundService
             var keyterms = KeytermsSelector.Select(settings.Dictionary);
             var request = new PostProcessRequest(session.Level, session.Tone, keyterms, session.Context.ProcessName, session.Context.Url, session.Rule.Hint, PauseMarkedTranscript: session.Assembler.PauseMarkedText);
             var result = await _postProcessor.ProcessAsync(rawText, request, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            session.Mark("cleanup");
+            ReportCleanupProblem(result);
             record.CleanedText = result.Applied ? result.Text : string.Empty;
             record.LlmModel = result.Model;
             record.FailureReason = result.Applied ? null : result.FailureReason;
@@ -646,7 +835,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
             // 6. Inserting. Re-verify the foreground window; keep the tone chosen at the start.
             PublishSession(session, DictationState.Inserting, "Inserting");
-            var target = SafeCapture();
+            var target = await CaptureWithinAsync().ConfigureAwait(false);
             var pasteMode = session.Rule.PasteMode;
             if (target.WindowHandle == 0 || target.WindowHandle == session.Context.WindowHandle)
             {
@@ -662,42 +851,46 @@ public sealed class DictationOrchestrator : BackgroundService
 
             var text = _formatter.Format(result.Text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
             record.InsertedText = text;
-            InsertionResult insertion;
-            if (target.IsEditable && !target.IsElevated)
-            {
-                insertion = await _inserter.InsertAsync(text, target, pasteMode, ct).ConfigureAwait(false);
-            }
-            else
-            {
-                await _clipboard.SetTextAsync(text, ct).ConfigureAwait(false);
-                insertion = new InsertionResult(InsertionOutcome.CopiedOnly, target.IsElevated ? "Target is elevated, text copied" : "No text box has focus, text copied");
-            }
 
+            // Insertion is the commit point: once it starts it runs to the end (paste, then clipboard restore), even if
+            // the app is closing meanwhile, so it takes no cancellation token.
+            var insertion = await DeliverAsync(text, target, pasteMode).ConfigureAwait(false);
+            session.Mark("insert");
             switch (insertion.Outcome)
             {
                 case InsertionOutcome.Inserted:
                     record.Status = RecordStatus.Inserted;
+                    if (insertion.LeftOnClipboard)
+                    {
+                        badge = badge is null ? "also copied" : badge + " · also copied";
+                    }
+
                     _machine.Fire(DictationTrigger.Inserted);
                     break;
                 case InsertionOutcome.CopiedOnly:
                     record.Status = RecordStatus.CopiedOnly;
-                    _notifier.Toast("Copied to clipboard", insertion.Reason ?? "Paste it where you need it.", ToastKind.Info);
                     _machine.Fire(DictationTrigger.CopiedOnly);
                     break;
                 default:
                     record.Status = RecordStatus.Failed;
-                    record.FailureReason = insertion.Reason;
-                    await _clipboard.SetTextAsync(text, ct).ConfigureAwait(false);
-                    _notifier.Toast("Could not insert", (insertion.Reason ?? "Unknown error") + ". Text copied to the clipboard.", ToastKind.Warning);
+                    record.FailureReason = AppendReason(record.FailureReason, insertion.Reason);
                     _machine.Fire(DictationTrigger.Failed);
                     break;
             }
 
             record.UpdatedAt = _time.GetUtcNow();
-            await SaveRecordAsync(record).ConfigureAwait(false);
+            if (await SaveRecordAsync(record).ConfigureAwait(false))
+            {
+                sink?.Complete();
+            }
+
             _ = BumpDictionaryUsageAsync(keyterms, rawText);
-            PublishIdle(badge);
-            _logger.LogInformation("Dictation {Status}: {Words} words, {Duration:0.0}s audio, llm={Model}", record.Status, CountWords(text), audioSeconds, result.Model ?? "none");
+            PublishIdle(session, badge);
+            _logger.LogInformation("Dictation {Status}: {Words} words, {Duration:0.0}s audio, llm={Model} (ms since the press: {Timings})", record.Status, CountWords(text), audioSeconds, result.Model ?? "none", session.Timings());
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await SaveInterruptedAsync(session, record, capture, sink, transcriber).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -730,12 +923,13 @@ public sealed class DictationOrchestrator : BackgroundService
                 _machine.Fire(DictationTrigger.Failed);
             }
 
+            var publishes = Publishes(session);
             if (ReferenceEquals(_session, session))
             {
                 _session = null;
             }
 
-            if (_hub.Current.State != DictationState.Idle)
+            if (publishes && _hub.Current.State != DictationState.Idle)
             {
                 PublishIdle(null);
             }
@@ -757,7 +951,56 @@ public sealed class DictationOrchestrator : BackgroundService
             await transcriber.AbortAsync().ConfigureAwait(false);
         }
 
-        PublishIdle(badge);
+        PublishIdle(session, badge);
+    }
+
+    /// <summary>
+    /// The app is closing (tray Quit, sign-out, shutdown) while a dictation runs: keep what was recorded as a Failed
+    /// record with its audio and the words heard so far, so Retry can finish it after the restart. No network call, no
+    /// paste, no toast; this has to fit in the host's shutdown time.
+    /// </summary>
+    private async Task SaveInterruptedAsync(DictationSession session, DictationRecord record, IAudioCapture? capture, IAudioSink? sink, IStreamingTranscriber? transcriber)
+    {
+        _logger.LogWarning("DictationApp closed during a dictation (state {State}); keeping it for Retry", _machine.State);
+        try
+        {
+            capture?.Stop();
+            session.Frames.Writer.TryComplete();
+            if (transcriber is not null)
+            {
+                await transcriber.AbortAsync().ConfigureAwait(false);
+            }
+
+            if (sink is not null && sink.BytesWritten > 0)
+            {
+                record.AudioPath = sink.Path;
+            }
+            else
+            {
+                sink?.Discard();
+            }
+
+            record.Status = RecordStatus.Failed;
+            record.FailureReason = InterruptedReason;
+            record.RawTranscript = session.Assembler.FinalText;
+            record.Tone = session.Tone;
+            record.Level = session.Level;
+            record.DurationMs = (int)session.AudioDuration.TotalMilliseconds;
+            record.UpdatedAt = _time.GetUtcNow();
+            if ((record.AudioPath is not null || !string.IsNullOrWhiteSpace(record.RawTranscript)) && await SaveRecordAsync(record).ConfigureAwait(false) && record.AudioPath is not null)
+            {
+                sink?.Complete();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not keep the interrupted dictation");
+        }
+
+        if (!_machine.IsIdle)
+        {
+            _machine.Fire(DictationTrigger.Failed);
+        }
     }
 
     private async Task FailAsync(DictationSession session, DictationRecord record, IAudioCapture? capture, IAudioSink? sink, IStreamingTranscriber? transcriber, Exception error, CancellationToken ct)
@@ -772,8 +1015,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
         if (sink is not null && sink.BytesWritten > 0)
         {
-            sink.Complete();
-            record.AudioPath = sink.Path;
+            record.AudioPath = sink.Path; // finished below once the record is saved
         }
         else
         {
@@ -783,6 +1025,12 @@ public sealed class DictationOrchestrator : BackgroundService
         record.Status = RecordStatus.Failed;
         record.FailureReason = error.Message;
         record.RawTranscript = session.Assembler.FinalText;
+        if (transcriber?.ConnectLatency is not null)
+        {
+            // The streaming session was open and billed; no summary, so the audio sent is the best estimate.
+            record.CostEstimate ??= CostEstimator.SttCost(_settings.Current.SpeechModel, session.AudioDuration);
+        }
+
         record.Tone = session.Tone;
         record.Level = session.Level;
         record.DurationMs = (int)session.AudioDuration.TotalMilliseconds;
@@ -799,32 +1047,154 @@ public sealed class DictationOrchestrator : BackgroundService
         }
         else if (record.AudioPath is not null)
         {
-            await SaveRecordAsync(record).ConfigureAwait(false);
-            if (isNetwork)
+            if (await SaveRecordAsync(record).ConfigureAwait(false))
             {
-                _notifier.Toast("Network error", "Saved to history. Use Retry when you are back online.", ToastKind.Warning);
+                sink?.Complete();
+                _notifier.Toast(
+                    isNetwork ? "Network error" : "Dictation failed",
+                    isNetwork ? "Saved to History. Use Retry when you are back online." : error.Message + " The recording is saved in History.",
+                    ToastKind.Warning);
             }
             else
             {
-                _notifier.Toast("Dictation failed", error.Message + " The recording is saved in History.", ToastKind.Warning);
+                // Left unfinished on purpose: the next start recovers it into History for Retry.
+                _notifier.Toast("Dictation failed", error.Message + " History could not be written; the recording is kept and will be listed in History after a restart.", ToastKind.Warning);
             }
         }
         else if (!string.IsNullOrWhiteSpace(record.RawTranscript))
         {
             // No audio ("Store audio" off, or nothing recorded) but some words were heard: keep them in History,
             // where they can still be copied. Retry needs audio, so it stays unavailable for this record.
-            await SaveRecordAsync(record).ConfigureAwait(false);
-            _notifier.Toast("Dictation failed", error.Message + " What was heard so far is saved in History.", ToastKind.Warning);
+            _notifier.Toast(
+                "Dictation failed",
+                error.Message + (await SaveRecordAsync(record).ConfigureAwait(false) ? " What was heard so far is saved in History." : " History could not be written (see the log)."),
+                ToastKind.Warning);
         }
         else
         {
             _notifier.Toast("Dictation failed", error.Message, ToastKind.Error);
         }
 
-        PublishIdle("Failed");
+        PublishIdle(session, "Failed");
     }
 
-    private async Task SaveRecordAsync(DictationRecord record)
+    /// <summary>
+    /// History's Re-insert: into the window that has focus now, with the same checks, spacing, paste keystroke and outcome
+    /// toasts as a live dictation. The record itself is not changed.
+    /// </summary>
+    public async Task<InsertionResult> ReInsertAsync(string text, CancellationToken ct)
+    {
+        if (!_machine.IsIdle)
+        {
+            _notifier.Toast("Re-insert", "Finish the current dictation first.", ToastKind.Warning);
+            return new InsertionResult(InsertionOutcome.Failed, "A dictation is running");
+        }
+
+        ct.ThrowIfCancellationRequested();
+        var target = SafeCapture();
+
+        // The stored text carries the spacing of where it first went; the new field decides afresh.
+        var formatted = _formatter.Format(text.TrimStart(), target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+        var insertion = await DeliverAsync(formatted, target, PasteModeFor(target, _settings.Current)).ConfigureAwait(false);
+        _logger.LogInformation("Re-insert into {Process}: {Outcome}", target.ProcessName, insertion.Outcome);
+        return insertion;
+    }
+
+    /// <summary>
+    /// Delivers <paramref name="text"/> into <paramref name="target"/>: a paste when it looks editable and is not
+    /// elevated, the clipboard otherwise, and the clipboard as well when the paste fails. Shows the toast for a copy or a
+    /// failure, and forgets the spacing memory of a window the text did not reach. Never cancelled half-way.
+    /// </summary>
+    private async Task<InsertionResult> DeliverAsync(string text, ForegroundContext target, PasteMode pasteMode)
+    {
+        InsertionResult insertion;
+        var copiedAfterFailure = false;
+        await _clipboardGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Copied text will be pasted by hand somewhere else, so it carries no joining space.
+            insertion = target.IsEditable && !target.IsElevated
+                ? await _inserter.InsertAsync(text, target, pasteMode, CancellationToken.None).ConfigureAwait(false)
+                : await CopyAsync(text.TrimStart(), target.IsElevated ? "Target is elevated, text copied" : "No text box has focus, text copied").ConfigureAwait(false);
+            if (insertion.Outcome == InsertionOutcome.Failed && target.IsEditable && !target.IsElevated)
+            {
+                copiedAfterFailure = (await CopyAsync(text.TrimStart(), null).ConfigureAwait(false)).Outcome == InsertionOutcome.CopiedOnly;
+            }
+        }
+        finally
+        {
+            _clipboardGate.Release();
+        }
+
+        switch (insertion.Outcome)
+        {
+            case InsertionOutcome.CopiedOnly:
+                _notifier.Toast("Copied to clipboard", insertion.Reason ?? "Paste it where you need it.", ToastKind.Info);
+                break;
+            case InsertionOutcome.Failed:
+                _notifier.Toast("Could not insert", (insertion.Reason ?? "Unknown error") + (copiedAfterFailure ? ". Text copied to the clipboard." : ". Use Copy in History."), ToastKind.Warning);
+                break;
+        }
+
+        if (insertion.Outcome != InsertionOutcome.Inserted)
+        {
+            _formatter.Reset(target.WindowHandle); // what is before the caret there is not what was remembered
+        }
+
+        return insertion;
+    }
+
+    private async Task<InsertionResult> CopyAsync(string text, string? reason)
+    {
+        try
+        {
+            await _clipboard.SetTextAsync(text, CancellationToken.None).ConfigureAwait(false);
+            return new InsertionResult(InsertionOutcome.CopiedOnly, reason);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not put the text on the clipboard");
+            return new InsertionResult(InsertionOutcome.Failed, AppendReason(reason, "the clipboard could not be set: " + ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// What AssemblyAI bills: the time the streaming session was open, from its Termination summary; otherwise the
+    /// measured fallback. The audio length alone misses the connection and handshake time and, for a paced replay,
+    /// is not what was billed either.
+    /// </summary>
+    public static TimeSpan BilledDuration(TerminationMessage? termination, TimeSpan fallback) =>
+        termination is { SessionDurationSeconds: > 0 } t ? TimeSpan.FromSeconds(t.SessionDurationSeconds) : fallback;
+
+    /// <summary>A failure reason added after another (cleanup, then insertion) is appended, never overwrites it.</summary>
+    private static string? AppendReason(string? existing, string? added) =>
+        string.IsNullOrEmpty(existing) ? added : string.IsNullOrEmpty(added) ? existing : existing + "; " + added;
+
+    /// <summary>
+    /// A cleanup settings problem that will recur (rejected key, a model the key may not use, a retired model) is shown
+    /// once per app run, even when a fallback model covered for it: otherwise the preferred model could silently stop
+    /// being used, and with the Minimal Flow bar a rejected key would show nothing at all.
+    /// </summary>
+    private void ReportCleanupProblem(PostProcessResult result)
+    {
+        if (result.ConfigurationProblem is not { } problem)
+        {
+            return;
+        }
+
+        lock (_reportedCleanupProblems)
+        {
+            if (!_reportedCleanupProblems.Add(problem))
+            {
+                return;
+            }
+        }
+
+        _notifier.Toast(result.Applied ? "Cleanup model problem" : "Cleanup skipped", problem, ToastKind.Warning);
+    }
+
+    /// <summary>False when History could not be written (logged); callers then say so instead of "saved".</summary>
+    private async Task<bool> SaveRecordAsync(DictationRecord record)
     {
         try
         {
@@ -836,10 +1206,13 @@ public sealed class DictationOrchestrator : BackgroundService
             {
                 await _history.UpdateAsync(record, CancellationToken.None).ConfigureAwait(false);
             }
+
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Could not write history record");
+            return false;
         }
     }
 
@@ -933,6 +1306,20 @@ public sealed class DictationOrchestrator : BackgroundService
         }
     }
 
+    /// <summary>The window in front now, or <see cref="ForegroundContext.Unknown"/> after <see cref="LookupTimeout"/>.</summary>
+    private async Task<ForegroundContext> CaptureWithinAsync()
+    {
+        var deadline = Task.Delay(LookupTimeout, _time);
+        var lookup = Task.Run(SafeCapture, CancellationToken.None);
+        return await Task.WhenAny(lookup, deadline).ConfigureAwait(false) == lookup ? await lookup.ConfigureAwait(false) : LookupTimedOut();
+    }
+
+    private ForegroundContext LookupTimedOut()
+    {
+        _logger.LogWarning("Window lookup took over {Seconds} s; going on without it", LookupTimeout.TotalSeconds);
+        return ForegroundContext.Unknown;
+    }
+
     private ForegroundContext SafeCapture()
     {
         try
@@ -946,8 +1333,31 @@ public sealed class DictationOrchestrator : BackgroundService
         }
     }
 
-    private void PublishSession(DictationSession session, DictationState state, string? badge) =>
-        _hub.Publish(new DictationStatus(state, session.Assembler.LiveText, session.LastPeak, session.Tone, session.Level, badge, session.StartedAt, session.Context.ProcessName, _hotkeys.Enabled));
+    /// <summary>
+    /// True while <paramref name="session"/> may publish status: it is the current session, or there is none (a
+    /// replacement gave up). A session a newer press has replaced (a tap still being cancelled) stays silent: the hotkey
+    /// service reads the status stream, and that session's level updates and closing Idle would otherwise look like the
+    /// new dictation answering its press and then ending, so the new press's tap was dropped and it recorded on with
+    /// nothing able to stop it.
+    /// </summary>
+    private bool Publishes(DictationSession session) => Volatile.Read(ref _session) is not { } current || ReferenceEquals(current, session);
+
+    private void PublishSession(DictationSession session, DictationState state, string? badge)
+    {
+        if (Publishes(session))
+        {
+            _hub.Publish(new DictationStatus(state, session.Assembler.LiveText, session.LastPeak, session.Tone, session.Level, badge, session.StartedAt, session.Context.ProcessName, _hotkeys.Enabled));
+        }
+    }
+
+    /// <summary>A session's closing Idle, unless a newer press has replaced it (see <see cref="Publishes"/>).</summary>
+    private void PublishIdle(DictationSession session, string? badge)
+    {
+        if (Publishes(session))
+        {
+            PublishIdle(badge);
+        }
+    }
 
     private void PublishIdle(string? badge)
     {
@@ -1049,7 +1459,7 @@ public sealed class DictationOrchestrator : BackgroundService
 
     private void OnChordDown() => _events.Writer.TryWrite(new ControlEvent(ControlKind.ChordDown));
 
-    private void OnChordUp() => _events.Writer.TryWrite(new ControlEvent(ControlKind.ChordUp));
+    private void OnChordUp(ChordRelease release) => _events.Writer.TryWrite(new ControlEvent(ControlKind.ChordUp, Release: release));
 
     private void OnEscape() => _events.Writer.TryWrite(new ControlEvent(ControlKind.Escape));
 
@@ -1072,7 +1482,7 @@ public sealed class DictationOrchestrator : BackgroundService
         SimulatedStart,
     }
 
-    private sealed record ControlEvent(ControlKind Kind, ArrowDirection? Arrow = null, Tone? Tone = null, CleanupLevel? Level = null, string? WavPath = null);
+    private sealed record ControlEvent(ControlKind Kind, ArrowDirection? Arrow = null, Tone? Tone = null, CleanupLevel? Level = null, string? WavPath = null, ChordRelease Release = ChordRelease.Hold);
 
     /// <summary>Mutable per-dictation state shared between the control loop and the session task.</summary>
     private sealed class DictationSession(DateTimeOffset startedAt)
@@ -1080,6 +1490,9 @@ public sealed class DictationOrchestrator : BackgroundService
         private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _escaped = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<Exception> _faulted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly List<(string Phase, long Ms)> _marks = [];
+        private int _releaseKind = -1; // -1 not released, 0 hold, 1 tap
         private long _bytes;
         private IStreamingTranscriber? _transcriber;
 
@@ -1125,7 +1538,38 @@ public sealed class DictationOrchestrator : BackgroundService
 
         public Task<Exception> Faulted => _faulted.Task;
 
-        public void Release() => _released.TrySetResult();
+        /// <summary>Notes when a phase was reached, for the one timing line logged per dictation (no text).</summary>
+        public void Mark(string phase)
+        {
+            lock (_marks)
+            {
+                if (!_marks.Exists(m => m.Phase == phase))
+                {
+                    _marks.Add((phase, _clock.ElapsedMilliseconds));
+                }
+            }
+        }
+
+        /// <summary>For example "mic 21, lookup 180, begin 902, release 3410, handshake 4120, cleanup 4800, insert 5130".</summary>
+        public string Timings()
+        {
+            lock (_marks)
+            {
+                return string.Join(", ", _marks.Select(m => $"{m.Phase} {m.Ms}"));
+            }
+        }
+
+        /// <summary>True when the first release of this session was a lone tap (the dictation is being cancelled).</summary>
+        public bool ReleasedAsTap => Volatile.Read(ref _releaseKind) == 1;
+
+        /// <summary>The first release decides; later ones (a stray key-up, the tray) change nothing.</summary>
+        public void Release(bool tap = false)
+        {
+            if (Interlocked.CompareExchange(ref _releaseKind, tap ? 1 : 0, -1) == -1)
+            {
+                _released.TrySetResult();
+            }
+        }
 
         public void Escape() => _escaped.TrySetResult();
 

@@ -15,14 +15,15 @@ src/DictationApp.Core        net8.0 class library, no Windows dependencies
                   ITextInserter, IClipboard, INotifier, ISecretStore, IApiKeyProvider
   Transcription/  SessionOptions, Messages (+parser), IStreamingTranscriber, AssemblyAiStreamingTranscriber,
                   TranscriptAssembler
-  Cleanup/        CleanupLevel/Tone, SpokenCommandNormaliser, PromptBuilder, OutputValidator,
-                  ITextPostProcessor + Passthrough + LlmGatewayPostProcessor + PostProcessorRouter
-  Insertion/      InsertionTextFormatter
-  Rules/          AppRule, AppRulesResolver, DefaultAppRules
+  Cleanup/        CleanupLevel/Tone, SpokenCommandNormaliser, ListFormatter, PromptBuilder, OutputValidator,
+                  ITextPostProcessor + Passthrough + LlmPostProcessor + PostProcessorRouter
+  Insertion/      InsertionTextFormatter, PasteVerification
+  Rules/          AppRule, AppRulesResolver (LegacyAppRules for the schema-3 migration)
   Dictionary/     DictionaryTerm, KeytermsSelector, CorrectionDiffer
   History/        DictationRecord, RecordStatus, RetentionPolicy, IHistoryRepository, SqliteHistoryRepository,
-                  CostEstimator
-  Settings/       AppSettings, ISettingsStore, JsonSettingsStore, HotkeyChord, SettingsApiKeyProvider, AppPaths
+                  CostEstimator, HistoryMaintenance (orphan sweep, Delete all, crash recovery), WavHeader
+  Settings/       AppSettings, ISettingsStore, JsonSettingsStore, SettingsEditTracker, HotkeyChord,
+                  SettingsApiKeyProvider, AppPaths
   Session/        DictationStateMachine, DictationStatusHub, DictationOrchestrator
 src/DictationApp.Windows     net8.0-windows class library
   Native/         NativeMethods (P/Invoke), WindowHelper
@@ -57,14 +58,18 @@ build/make_icon.py, build/app.ico, build/pack.ps1
 - **Abstractions** are deliberately tiny. Everything the orchestrator needs from Windows is an interface with
   one job, which is what makes the end-to-end orchestrator tests possible with in-memory fakes.
 - **Settings** are a POCO serialised with `System.Text.Json` (enums as strings, indented). Writes go to a temp
-  file then `File.Move(overwrite)`, so a crash mid-write cannot corrupt the file; an unreadable file is renamed
-  `settings.json.corrupt-<timestamp>` and defaults are used.
+  file that is flushed to the disk and then `File.Move(overwrite)`d over settings.json, so neither a crash nor a
+  power cut can leave a partial file; an unreadable file is renamed `settings.json.corrupt-<timestamp>` and defaults
+  are used. `UpdateAsync` reads, mutates and writes under one lock; a file migrated on load is written back at once.
+  The Settings window saves through `SettingsEditTracker`, which merges only what was changed in the window into the
+  latest settings.
 - **HotkeyChord** stores virtual-key codes, normalises left/right modifiers, sorts modifiers first and renders
   names like `Ctrl+Win`. Up to three keys.
 - **AppRulesResolver** is pure: it takes the foreground context and the rule list and returns the effective
   tone/level/paste mode plus which rule matched (for the log).
 - **KeytermsSelector** and **CorrectionDiffer** are pure functions; the differ is a classic word-level LCS whose
-  replaced runs become candidate terms.
+  replaced runs become candidate terms. It sets the common start and end aside first and refuses a remaining
+  stretch over 4,000 × 4,000 words (`IsTooLong`).
 - **SqliteHistoryRepository** uses `Microsoft.Data.Sqlite` (bundled e_sqlite3 has FTS5). Schema v1 creates the
   `dictations` table, an FTS5 external-content table over five columns, and insert/update/delete triggers that
   keep the index in sync. Migrations are SQL strings applied in a transaction with the version recorded in
@@ -97,10 +102,12 @@ build/make_icon.py, build/app.ico, build/pack.ps1
   `https://api.groq.com/openai/v1/` by default (`LlmBaseUrl` setting), with `Authorization: Bearer <Groq key>`
   through `IHttpClientFactory`. Budgets are enforced with linked `CancellationTokenSource`s cancelled by
   `TimeProvider.CreateTimer`, so the tests drive both the per-attempt and total timeouts with a
-  `FakeTimeProvider`. A 401/403 aborts the chain (a bad key will not get better with another model); 429 rate
-  limits, other 4xx/5xx, timeouts and invalid output move to the next model. Models whose name contains
-  `gpt-oss` are sent `reasoning_effort: "low"`; the response's `reasoning` field is ignored and only
-  `message.content` is used. (Version 0.1.0 used the AssemblyAI LLM Gateway; the user's account has no access
+  `FakeTimeProvider`. A 401 aborts the chain (a rejected key will not get better with another model); a 403 (a
+  model the key may not use), 429 rate limits, other 4xx/5xx, timeouts, a reply whose `finish_reason` is not `stop`
+  (cut off at the token limit, filtered) and invalid output move to the next model. The failure reason keeps every
+  attempt; a 401/403/unknown-model answer is also returned as `ConfigurationProblem`, which the orchestrator toasts
+  once per run. Models whose name contains `gpt-oss` are sent `reasoning_effort: "low"`; the response's `reasoning`
+  field is ignored and only `message.content` is used. (Version 0.1.0 used the AssemblyAI LLM Gateway; the user's account has no access
   to it, so 0.2.0 moved cleanup to Groq's free tier and settings files are migrated to the new model IDs.)
 - `OutputValidator.Strip` removes code fences and surrounding quotes; `Validate` applies the banned-prefix and
   length-ratio rules (skipped for inputs under 20 characters where ratios are meaningless).
@@ -109,27 +116,34 @@ build/make_icon.py, build/app.ico, build/pack.ps1
 ## Step 5: state machine and orchestrator
 
 - `DictationStateMachine` uses Stateless with explicit `Permit`/`Ignore` for every trigger in every state, so an
-  unexpected event can never throw. `ChordUp` in Arming is a `PermitDynamic` that compares the hold duration
-  with the 300 ms threshold using `TimeProvider`.
+  unexpected event can never throw. It has no clock: whether a release was a tap (`Tap`, cancel) or a hold
+  (`ChordUp`, finish) comes from the hotkey service. Escape is permitted only in Arming and Recording.
 - `DictationOrchestrator` (a `BackgroundService`) owns one session at a time:
-  1. **ChordDown** → capture foreground context (window, process, title, editable, elevated, URL) and resolve
-     the app rule; start microphone capture and the WAV sink; frames go into an unbounded channel; open the
-     socket with a 3 s timeout.
-  2. Wait for the first of: Begin, release, Escape, fault. Release before Begin: a short tap cancels
-     (abort socket, discard WAV); a real hold waits for the connection then flushes the buffered audio and
-     finalises.
+  1. **ChordDown** → start the WAV sink and the microphone first (anything said before it starts is lost; frames
+     go into an unbounded channel), then open the socket with a 3 s timeout, then capture the foreground context
+     (window, process, title, editable, elevated, URL: 100 ms or more in browsers) and resolve the app rule.
+  2. Wait for the first of: Begin, release, Escape, fault; Escape wins a tie with the release. A tap cancels
+     (abort socket, discard WAV). A hold released before Begin stops the microphone at once (its last partial
+     frame is delivered by `Stop`), completes the channel, waits for the connection and sends what was recorded.
   3. **Recording**: a sender task drains the channel into the socket; turns update the assembler and the
      status hub; arrow keys and chip clicks change tone/level; a `Task.Delay` on the `TimeProvider` enforces the
-     cap.
+     cap. A tap reported after Begin still cancels.
   4. **Finalising**: stop capture, complete the channel, wait ≤1.5 s for the tail to drain, run the handshake
-     under the 2.5 s cap, complete the WAV.
+     under the 2.5 s cap. The WAV is finished (sizes written) only after its record is saved, so a crash before
+     that leaves the "unfinished" marker that the next start recovers.
   5. **PostProcessing**: router → LLM or passthrough. Failure yields raw text and the "cleanup skipped" badge.
-  6. **Inserting**: re-capture the foreground; paste if editable and not elevated, else clipboard + toast;
-     write the history record; bump dictionary use counts.
+  6. **Inserting**: re-capture the foreground; one delivery step (also used by History's Re-insert) pastes if
+     editable and not elevated, else copies with a toast, copies after a failed paste, and forgets the spacing
+     memory of a window the text did not reach; clipboard writers take turns behind one gate. Then the history
+     record is written and dictionary use counts bumped. Insertion takes no cancellation token.
 - Faults at any point keep the WAV, write a Failed record and toast; `MicrophoneAccessDeniedException` gets a
-  toast that deep-links to the Windows privacy page. A watcher warns after 2 s of all-silent frames.
-- `RetryAsync` and `TranscribeWavAsync` re-stream a WAV through a fresh session (used by History › Retry and
-  `--stream-test`); `SimulateDictationFromWav` runs a normal session with a WAV standing in for the microphone.
+  toast that deep-links to the Windows privacy page. A watcher warns after 2 s of all-silent frames. When the host
+  stops (Quit, sign-out) the session saves what it has as a Failed "Interrupted" record, without network calls.
+  One text-free timing line per session logs the milliseconds since the press for each phase.
+- `RetryAsync` and `TranscribeWavAsync` re-stream a WAV through a fresh session at real time (AssemblyAI processes
+  streamed audio at about 1.25× at most) for History › Retry and `--stream-test`; a retry without a Termination
+  summary keeps the earlier words. `SimulateDictationFromWav` runs a normal session with a WAV standing in for the
+  microphone.
 
 ## Step 6: Windows adapters
 
@@ -143,26 +157,36 @@ build/make_icon.py, build/app.ico, build/pack.ps1
   is on). The chord fires when all chord keys and only chord keys are down and no other key was pressed while
   a modifier was held. Firing a Win chord injects VK 0xE8 down/up through `SendInput`. While the chord is
   physically held, Escape/arrows raise events and every other key is swallowed. A release under 300 ms is a
-  tap: a lone tap raises ChordUp (the orchestrator cancels the short press); a second tap within 400 ms of the
-  first tap's release suppresses its ChordUp and marks the dictation hands-free, and any later chord press
-  raises ChordUp to stop it (that press's own release is ignored). Hands-free, only Escape is intercepted. The
-  clock is injectable so the tests simulate holds and tap gaps. Handlers are queued on a single-consumer
-  channel so their order is preserved and the hook thread never blocks.
+  tap, measured from the key events themselves. A lone tap raises `ChordUp(Tap)` once the 400 ms double-tap window
+  has passed without a second press; a second press inside it raises nothing and continues the first press's
+  dictation: released as a tap it makes it hands-free, released after a hold it raises `ChordUp(Hold)`. Any chord
+  press while hands-free raises `ChordUp(Hold)` to stop it (that press's own release is ignored). Hands-free, only
+  Escape is intercepted, and only until the dictation stops recording (the service watches the status hub); a press
+  the orchestrator ignores as busy (the hub flashes) never latches hands-free. `StartHandsFree`/`StopHandsFree` serve
+  the tray; `ObserveOnly` turns presses into `ChordObserved` events for chord tests. The clock and the double-tap
+  timer are injectable so the tests simulate holds, tap gaps and the window. Handlers are queued on a
+  single-consumer channel so their order is preserved and the hook thread never blocks.
 - **Audio**: `WasapiCapture` in shared mode with 20 ms buffers delivers the device mix format;
   `Pcm16Pipeline` runs `BufferedWaveProvider → mono mix → WdlResampler(16 kHz) → PCM16` and slices 3200-byte
-  frames with a peak level. Our own 16 kHz mono WAVs bypass the float round trip. `WavFileSink` writes with
-  NAudio's `WaveFileWriter`; `WavReplayAudioCapture` paces frames at 100 ms ÷ speed.
-- **Focus**: `FocusedEditableDetector` runs the UIA probe on a task with a 350 ms budget (some apps stall UIA),
-  then `GetGUIThreadInfo().hwndCaret`, then the allowlist. `ElevationProbe` opens the process with
+  frames with a peak level. Our own 16 kHz mono WAVs bypass the float round trip. `Stop` flushes the pipeline's last
+  partial frame (zero-padded) on both the kept-ready and the cold path before it returns. A chosen microphone that
+  is not connected falls back to the default communications device. `WavFileSink` writes a 44-byte header itself
+  and its sizes only on `Complete` (zero until then: the "unfinished" marker `HistoryMaintenance` repairs);
+  `WavReplayAudioCapture` paces frames at 100 ms ÷ speed.
+- **Focus**: `FocusedEditableDetector` runs the UIA probe on a task with a 350 ms budget (some apps stall UIA; its
+  automation object also times calls out after 2 s and is never disposed by a failing probe), then
+  `GetGUIThreadInfo().hwndCaret`, then the allowlist. `ElevationProbe` opens the process with
   `PROCESS_QUERY_LIMITED_INFORMATION`, queries `TokenElevation`, and treats access-denied on the token as
   elevated. `ForegroundContextProvider` reads the omnibox by its accessible name per browser, falling back to the
   first Edit whose value looks like a URL.
 - **Clipboard**: every operation runs on a new STA thread (`Clipboard` requires STA and OLE) with 10 retries on
   `CLIPBRD_E_CANT_OPEN`. The snapshot keeps UnicodeText, Text, HTML, RTF, DIB and FileDrop; streams are copied to
   byte arrays so they survive the thread. `ClipboardPasteInserter` sets the text, sends key-ups for any modifier
-  still physically held, restores the target to the foreground (`AttachThreadInput` trick), sends Ctrl+V with
-  scan codes, waits 250 ms plus a stable `GetClipboardSequenceNumber`, then restores the snapshot only if the
-  sequence number still equals the one after our own set.
+  still physically held, restores the target to the foreground (`AttachThreadInput` trick) and checks that it is in
+  front (else CopiedOnly), sends Ctrl+V with scan codes and checks `SendInput` injected every event (else
+  CopiedOnly), waits 250 ms plus a stable `GetClipboardSequenceNumber`, then reads the text before the caret: it
+  restores the snapshot when that ends like the pasted text (and the sequence number still equals the one after our
+  own set), and otherwise leaves the dictation on the clipboard (`LeftOnClipboard`).
 
 ## Step 7: WPF app
 
@@ -180,19 +204,26 @@ build/make_icon.py, build/app.ico, build/pack.ps1
 - `TrayIcon` uses H.NotifyIcon with a code-built context menu; toasts go through `ShowNotification` and a
   pending action URI is opened on click.
 - The chord recorder in Settings collects keys held together (`PreviewKeyDown`/`Up`) and writes the chord
-  text; the API tab's "Test key" requests a streaming token (proves the key) and then a two-token gateway
-  completion (proves LLM access), reporting each separately.
+  text, with the hotkey service observing only while it has focus; the API tab's "Test keys" requests a streaming
+  token (proves the AssemblyAI key) and then a tiny completion with every model of the cleanup chain, reporting
+  each separately.
 
 ## Step 8: tests
 
-143 tests, all green, runnable with `dotnet test DictationApp.sln`:
+Runnable with `dotnet test DictationApp.sln` (CI runs both projects; counts are not kept here because they change
+with every fix):
 
-- Core (129): assembler, state machine (fake clock), normaliser, prompt builder, router, validator, gateway
-  client (scripted `HttpMessageHandler`, fake clock for timeouts), formatter, rules, keyterms, differ, SQLite
-  repository on a temp DB, settings store, chord parsing, session options, message parser, cost estimator, and
-  eleven orchestrator scenarios with in-memory fakes.
-- Windows (14): DPAPI round trip, WAV sink, PCM pipeline, hotkey filter behaviour by invoking the hook's
-  filter delegate directly (no real hook).
+- Core: assembler, state machine, normaliser, prompt builder, router, validator, cleanup client (scripted
+  `HttpMessageHandler`, fake clock for timeouts, finish_reason, 401/403/retired-model handling), formatter, paste
+  verification, rules, keyterms, differ, SQLite repository on a temp DB, history maintenance on real files (5,001
+  records, Delete all, crash recovery), settings store and Save merging, chord parsing, session options, message
+  parser, cost estimator, and orchestrator scenarios with in-memory fakes (lifecycle, taps, discard, shutdown,
+  retry, delivery outcomes, Re-insert).
+- Windows: DPAPI round trip, WAV sink (including the unfinished marker), PCM pipeline, hotkey filter behaviour by
+  invoking the hook's filter delegate directly with a fake clock and fake timers (no real hook).
+- Not covered by automated tests: real microphones, UI Automation against real apps, the actual paste into other
+  processes, the tray and windows (`--smoke` constructs them), and AssemblyAI/Groq themselves; see the
+  [manual checklist](manual-test-checklist.md).
 
 ## Step 9: packaging and release
 
@@ -212,7 +243,7 @@ dotnet run --project src/DictationApp                                      # tra
 
 What was verified during the build, in this order:
 
-1. `dotnet test`: 143 tests green.
+1. `dotnet test`: all green.
 2. `--stream-test`: a real session with four turns, ~960 ms connect latency, 890 ms handshake, exact text.
 3. `--simulate` on a **locked** session: streaming, cleanup fallback and history worked; the clipboard step
    failed because `OpenClipboard` is refused for every process while `LogonUI` is active. That exercised the
@@ -241,7 +272,8 @@ How an update actually flows, as exercised on 2026-09-22:
 4. The relaunched app logged version 0.2.0, re-registered its Run key, and read the same
    `%LOCALAPPDATA%\ThomasWCode\DictationApp\settings.json` (same SHA-256 as before): settings survive because
    they are not in Velopack's folder. Its first automatic check 45 s later failed with a 404 because no GitHub
-   token was stored in Settings yet; that is the reminder to add one while the repository is private.
+   token was stored in Settings yet; that is the reminder to add one while the repository is private. (The
+   repository has since been made public, so no token is needed.)
 
 Anyone still on 0.1.0 installs 0.2.0 once by running its `Setup.exe`; from then on the updater works.
 

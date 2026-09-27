@@ -11,6 +11,7 @@ using DictationApp.Services;
 using DictationApp.Settings;
 using DictationApp.Tray;
 using DictationApp.Windows;
+using DictationApp.Windows.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Serilog;
@@ -26,17 +27,23 @@ public static class HostFactory
         var paths = AppPaths.Default;
         paths.EnsureDirectories();
 
+        // The log file sits behind a switch so "Delete all history" can close it, delete every log and open a new one.
+        var logFile = new ClosableFileSink(() => new LoggerConfiguration()
+            .MinimumLevel.Verbose()
+            .WriteTo.File(Path.Combine(paths.LogDirectory, "dictation-.log"), rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14, shared: true, outputTemplate: "{Timestamp:HH:mm:ss.fff} [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}")
+            .CreateLogger());
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Debug()
             .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
             .MinimumLevel.Override("System.Net.Http", LogEventLevel.Warning)
             .Enrich.FromLogContext()
-            .WriteTo.File(Path.Combine(paths.LogDirectory, "dictation-.log"), rollingInterval: RollingInterval.Day, retainedFileCountLimit: 14, shared: true, outputTemplate: "{Timestamp:HH:mm:ss.fff} [{Level:u3}] {SourceContext}: {Message:lj}{NewLine}{Exception}")
+            .WriteTo.Sink(logFile)
             .WriteTo.Debug()
             .CreateLogger();
 
         var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings { DisableDefaults = true });
         builder.Services.AddSerilog();
+        builder.Services.AddSingleton<ILogFileControl>(logFile);
         builder.Services.AddSingleton(options);
         builder.Services.AddDictationCore(paths);
         builder.Services.AddDictationWindows();

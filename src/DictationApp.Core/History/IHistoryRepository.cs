@@ -25,5 +25,11 @@ public interface IHistoryRepository
 
     Task<HistoryStats> GetStatsAsync(CancellationToken ct = default);
 
+    /// <summary>
+    /// Every audio path any record refers to, however many records there are. The orphan sweep deletes what is not in
+    /// it, so it must never be a page of the newest records only.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetReferencedAudioPathsAsync(CancellationToken ct = default);
+
     Task<IReadOnlyList<string>> DeleteAllAsync(CancellationToken ct = default);
 }

@@ -54,7 +54,15 @@ public enum InsertionOutcome
     Failed,
 }
 
-public sealed record InsertionResult(InsertionOutcome Outcome, string? Reason = null);
+/// <param name="Outcome">
+/// Inserted: delivered into the target. CopiedOnly: not delivered, the text is on the clipboard for the user to paste.
+/// Failed: not delivered and the clipboard could not be set either.
+/// </param>
+/// <param name="LeftOnClipboard">
+/// Inserted, but the insertion could not be confirmed (or the previous clipboard could not be restored), so the text
+/// was also left on the clipboard: unsure whether it landed, the user can still paste it.
+/// </param>
+public sealed record InsertionResult(InsertionOutcome Outcome, string? Reason = null, bool LeftOnClipboard = false);
 
 public interface ITextInserter
 {

@@ -48,7 +48,7 @@ public sealed class ForegroundContextProvider : IForegroundContextProvider, IDis
         var processName = ProcessName((int)pid);
         var title = NativeMethods.GetWindowText(hwnd);
         var elevated = ElevationProbe.IsTargetElevatedAboveUs((int)pid);
-        var (editable, reason) = _editable.Detect(hwnd, threadId, processName);
+        var (editable, reason) = _editable.Detect(threadId, processName);
         string? url = null;
         if (BrowserAddressBarNames.TryGetValue(processName, out var names))
         {
@@ -128,9 +128,8 @@ public sealed class ForegroundContextProvider : IForegroundContextProvider, IDis
             }
             catch (Exception ex)
             {
+                // Not disposed here: a read that timed out earlier may still be using the shared automation object.
                 _logger.LogDebug(ex, "Address bar read failed");
-                _automation?.Dispose();
-                _automation = null;
             }
 
             return null;

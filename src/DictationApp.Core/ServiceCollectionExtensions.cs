@@ -25,6 +25,7 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton<ISettingsStore>(sp => new JsonSettingsStore(paths.SettingsFile, sp.GetRequiredService<ILogger<JsonSettingsStore>>()));
         services.TryAddSingleton<IApiKeyProvider, SettingsApiKeyProvider>();
         services.TryAddSingleton<IHistoryRepository>(sp => new SqliteHistoryRepository(paths.HistoryDb, sp.GetRequiredService<ILogger<SqliteHistoryRepository>>()));
+        services.TryAddSingleton<HistoryMaintenance>();
         services.TryAddSingleton<IStreamingTranscriberFactory, StreamingTranscriberFactory>();
         services.TryAddSingleton<PassthroughPostProcessor>();
         services.TryAddSingleton<LlmPostProcessor>();

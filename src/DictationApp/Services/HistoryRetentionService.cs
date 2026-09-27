@@ -1,20 +1,23 @@
-using System.IO;
+using System.Diagnostics;
+using DictationApp.Core.Abstractions;
 using DictationApp.Core.History;
-using DictationApp.Core.Settings;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace DictationApp.Services;
 
 /// <summary>
-/// Applies the retention policies at startup and hourly: records older than the history retention are
-/// deleted (with their WAVs); audio older than the audio retention is deleted while the text stays.
-/// Orphan WAVs (no record references them) older than a day are swept too.
+/// Applies the retention policies at startup and hourly (<see cref="HistoryMaintenance.RunRetentionPassAsync"/>):
+/// records older than the history retention are deleted (with their WAVs); audio older than the audio retention is
+/// deleted while the text stays; orphan WAVs older than a day are swept. The first successful pass of a run first
+/// recovers recordings a previous run left unfinished (killed, crashed, power cut) into History for Retry.
 /// </summary>
-public sealed class HistoryRetentionService(IHistoryRepository history, ISettingsStore settings, AppPaths paths, ILogger<HistoryRetentionService> logger, TimeProvider time) : BackgroundService
+public sealed class HistoryRetentionService(HistoryMaintenance maintenance, INotifier notifier, ILogger<HistoryRetentionService> logger, TimeProvider time) : BackgroundService
 {
     public static readonly TimeSpan Interval = TimeSpan.FromHours(1);
     public static readonly TimeSpan StartupDelay = TimeSpan.FromSeconds(15);
+
+    private bool _recovered;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -36,25 +39,23 @@ public sealed class HistoryRetentionService(IHistoryRepository history, ISetting
     {
         try
         {
-            var s = settings.Current;
-            var now = time.GetUtcNow();
-            var deleted = 0;
-            if (s.HistoryRetention.ToTimeSpan() is { } keep)
+            // Recovery is marked done only once a pass has checked every recording: a database error, or a file that
+            // could not be read, leaves it for the next pass.
+            var pass = await maintenance.RunRetentionPassAsync(_recovered ? null : RunStartedAt(), ct);
+            _recovered = pass.RecoveryComplete;
+            if (pass.Recovered > 0)
             {
-                var paths = await history.DeleteOlderThanAsync(now - keep, ct);
-                deleted += DeleteFiles(paths);
+                notifier.Toast(
+                    "Dictation recovered",
+                    pass.Recovered == 1
+                        ? "A dictation interrupted when DictationApp last stopped is in History. Use Retry to transcribe it."
+                        : $"{pass.Recovered} dictations interrupted when DictationApp last stopped are in History. Use Retry to transcribe them.",
+                    ToastKind.Info);
             }
 
-            if (s.AudioRetention.ToTimeSpan() is { } keepAudio)
+            if (pass.RemovedFiles > 0)
             {
-                var paths = await history.ClearAudioOlderThanAsync(now - keepAudio, ct);
-                deleted += DeleteFiles(paths);
-            }
-
-            deleted += SweepOrphans(now);
-            if (deleted > 0)
-            {
-                logger.LogInformation("Retention removed {Count} audio files", deleted);
+                logger.LogInformation("Retention removed {Count} audio files", pass.RemovedFiles);
             }
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -63,70 +64,10 @@ public sealed class HistoryRetentionService(IHistoryRepository history, ISetting
         }
     }
 
-    private int SweepOrphans(DateTimeOffset now)
+    /// <summary>Files last written before this are from an earlier run; this run's may still be recording.</summary>
+    private static DateTimeOffset RunStartedAt()
     {
-        if (!Directory.Exists(paths.AudioDirectory))
-        {
-            return 0;
-        }
-
-        var cutoff = now - TimeSpan.FromDays(1);
-        var referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            foreach (var record in history.SearchAsync(null, 5000).GetAwaiter().GetResult())
-            {
-                if (record.AudioPath is not null)
-                {
-                    referenced.Add(Path.GetFullPath(record.AudioPath));
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogDebug(ex, "Could not list referenced audio; skipping orphan sweep");
-            return 0;
-        }
-
-        var count = 0;
-        foreach (var file in Directory.EnumerateFiles(paths.AudioDirectory, "*.wav"))
-        {
-            try
-            {
-                if (!referenced.Contains(Path.GetFullPath(file)) && File.GetLastWriteTimeUtc(file) < cutoff.UtcDateTime)
-                {
-                    File.Delete(file);
-                    count++;
-                }
-            }
-            catch (IOException)
-            {
-                // In use; next pass.
-            }
-        }
-
-        return count;
-    }
-
-    private int DeleteFiles(IEnumerable<string> files)
-    {
-        var count = 0;
-        foreach (var file in files)
-        {
-            try
-            {
-                if (File.Exists(file))
-                {
-                    File.Delete(file);
-                    count++;
-                }
-            }
-            catch (IOException ex)
-            {
-                logger.LogDebug(ex, "Could not delete {File}", file);
-            }
-        }
-
-        return count;
+        using var process = Process.GetCurrentProcess();
+        return new DateTimeOffset(process.StartTime.ToUniversalTime(), TimeSpan.Zero);
     }
 }

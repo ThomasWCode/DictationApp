@@ -15,7 +15,12 @@ public enum DictationState
 public enum DictationTrigger
 {
     ChordDown,
+
+    /// <summary>The chord was released after a hold, or a hands-free dictation was stopped: finish and insert.</summary>
     ChordUp,
+
+    /// <summary>A lone press shorter than the tap threshold, as classified by the hotkey service: cancel.</summary>
+    Tap,
     BeginReceived,
     ConnectTimeout,
     SocketFault,
@@ -30,25 +35,30 @@ public enum DictationTrigger
 }
 
 /// <summary>
-/// Declarative state machine (Stateless) for one dictation. The only time-dependent decision, "was that a
-/// short tap or a real hold?", lives here so it can be unit-tested with a fake clock. Everything else is
-/// fired by the orchestrator in response to real events or timers.
+/// Declarative state machine (Stateless) for one dictation, fired by the orchestrator in response to real events and
+/// timers.
+/// <para>
+/// Whether a release was a short tap or a hold is decided by the hotkey service from the physical key times
+/// (<see cref="DictationTrigger.Tap"/> versus <see cref="DictationTrigger.ChordUp"/>), never from when the orchestrator
+/// got round to handling the release: start-up work (microphone, window lookup) can take longer than the 300 ms
+/// threshold, which turned taps into billed holds. A tap cancels whether or not the streaming session has begun.
+/// </para>
+/// A discard (<see cref="DictationTrigger.Escape"/>) is only possible while recording (Arming or Recording). Once the
+/// chord is released the dictation always finishes, into the text field or onto the clipboard, and is kept in History.
 /// </summary>
 public sealed class DictationStateMachine
 {
     private readonly StateMachine<DictationState, DictationTrigger> _machine;
-    private readonly TimeProvider _time;
     private readonly object _lock = new();
-    private DateTimeOffset _armedAt;
 
-    public DictationStateMachine(TimeProvider? time = null)
+    public DictationStateMachine()
     {
-        _time = time ?? TimeProvider.System;
         _machine = new StateMachine<DictationState, DictationTrigger>(DictationState.Idle);
 
         _machine.Configure(DictationState.Idle)
             .Permit(DictationTrigger.ChordDown, DictationState.Arming)
             .Ignore(DictationTrigger.ChordUp)
+            .Ignore(DictationTrigger.Tap)
             .Ignore(DictationTrigger.Escape)
             .Ignore(DictationTrigger.BeginReceived)
             .Ignore(DictationTrigger.SocketFault)
@@ -64,16 +74,11 @@ public sealed class DictationStateMachine
         _machine.Configure(DictationState.Arming)
             .OnEntry(() =>
             {
-                _armedAt = _time.GetUtcNow();
                 LastReleaseWasShortTap = false;
                 WasDiscarded = false;
             })
-            .PermitDynamic(DictationTrigger.ChordUp, () =>
-            {
-                var held = _time.GetUtcNow() - _armedAt;
-                LastReleaseWasShortTap = held < ShortPressThreshold;
-                return LastReleaseWasShortTap ? DictationState.Idle : DictationState.Finalising;
-            })
+            .Permit(DictationTrigger.ChordUp, DictationState.Finalising)
+            .Permit(DictationTrigger.Tap, DictationState.Idle)
             .Permit(DictationTrigger.BeginReceived, DictationState.Recording)
             .Permit(DictationTrigger.ConnectTimeout, DictationState.Idle)
             .Permit(DictationTrigger.SocketFault, DictationState.Idle)
@@ -89,6 +94,7 @@ public sealed class DictationStateMachine
 
         _machine.Configure(DictationState.Recording)
             .Permit(DictationTrigger.ChordUp, DictationState.Finalising)
+            .Permit(DictationTrigger.Tap, DictationState.Idle) // Begin arrived before the tap was released
             .Permit(DictationTrigger.CapReached, DictationState.Finalising)
             .Permit(DictationTrigger.Escape, DictationState.Idle)
             .Permit(DictationTrigger.SocketFault, DictationState.Idle)
@@ -106,9 +112,10 @@ public sealed class DictationStateMachine
             .Permit(DictationTrigger.HandshakeComplete, DictationState.PostProcessing)
             .Permit(DictationTrigger.NothingHeard, DictationState.Idle)
             .Permit(DictationTrigger.Failed, DictationState.Idle)
-            .Permit(DictationTrigger.Escape, DictationState.Idle)
+            .Ignore(DictationTrigger.Escape) // released: the dictation finishes (a discard is only possible while recording)
             .Ignore(DictationTrigger.ChordDown)
             .Ignore(DictationTrigger.ChordUp)
+            .Ignore(DictationTrigger.Tap)
             .Ignore(DictationTrigger.BeginReceived)
             .Ignore(DictationTrigger.ConnectTimeout)
             .Ignore(DictationTrigger.SocketFault)
@@ -122,6 +129,7 @@ public sealed class DictationStateMachine
             .Permit(DictationTrigger.Failed, DictationState.Idle)
             .Ignore(DictationTrigger.ChordDown)
             .Ignore(DictationTrigger.ChordUp)
+            .Ignore(DictationTrigger.Tap)
             .Ignore(DictationTrigger.Escape)
             .Ignore(DictationTrigger.BeginReceived)
             .Ignore(DictationTrigger.ConnectTimeout)
@@ -138,6 +146,7 @@ public sealed class DictationStateMachine
             .Permit(DictationTrigger.Failed, DictationState.Idle)
             .Ignore(DictationTrigger.ChordDown)
             .Ignore(DictationTrigger.ChordUp)
+            .Ignore(DictationTrigger.Tap)
             .Ignore(DictationTrigger.Escape)
             .Ignore(DictationTrigger.BeginReceived)
             .Ignore(DictationTrigger.ConnectTimeout)
@@ -154,6 +163,11 @@ public sealed class DictationStateMachine
                 WasDiscarded = true;
             }
 
+            if (t.Trigger == DictationTrigger.Tap)
+            {
+                LastReleaseWasShortTap = true;
+            }
+
             Transitioned?.Invoke(new DictationTransition(t.Source, t.Destination, t.Trigger));
         });
     }
@@ -162,8 +176,6 @@ public sealed class DictationStateMachine
 
     /// <summary>Raised when a ChordDown arrives while a dictation is already running (bar flash).</summary>
     public event Action? ChordDownIgnored;
-
-    public TimeSpan ShortPressThreshold { get; init; } = TimeSpan.FromMilliseconds(300);
 
     public DictationState State
     {
@@ -178,13 +190,11 @@ public sealed class DictationStateMachine
 
     public bool IsIdle => State == DictationState.Idle;
 
-    /// <summary>True after a ChordUp in Arming that was shorter than <see cref="ShortPressThreshold"/>.</summary>
+    /// <summary>True after a <see cref="DictationTrigger.Tap"/> cancelled the dictation.</summary>
     public bool LastReleaseWasShortTap { get; private set; }
 
     /// <summary>True after an Escape transition; the current session's text must not be inserted or stored.</summary>
     public bool WasDiscarded { get; private set; }
-
-    public TimeSpan HeldFor => State == DictationState.Idle ? TimeSpan.Zero : _time.GetUtcNow() - _armedAt;
 
     /// <summary>Fires the trigger; returns the resulting state. Unknown triggers for the state are ignored.</summary>
     public DictationState Fire(DictationTrigger trigger)

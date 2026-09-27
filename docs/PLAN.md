@@ -1,5 +1,9 @@
 # DictationApp: design and implementation plan
 
+> **Historical.** This is the plan agreed before the code was written (2026-09-22). Later decisions supersede it:
+> see [decisions](decisions.md) for what changed and why (for example Groq replaced the AssemblyAI LLM Gateway, app
+> rules start empty, taps are classified by the hotkey service), and [features](features.md) for current behaviour.
+
 Windows dictation app in the style of Wispr Flow, built on AssemblyAI. This document is the agreed plan before any code is written; it will be revised as phases land.
 
 ## Context

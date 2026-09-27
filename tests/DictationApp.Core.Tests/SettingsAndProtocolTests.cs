@@ -250,6 +250,9 @@ public sealed class JsonSettingsStoreTests : IDisposable
         Assert.Equal("openai/gpt-oss-120b", store.Current.LlmModel);
         Assert.Contains("qwen/qwen3.8-27b", store.Current.LlmFallbackModels);
         Assert.Equal(FlowBarMode.Full, store.Current.FlowBarMode);
+
+        // Written back at once, so the next start does not migrate the old file again.
+        Assert.Contains("\"SchemaVersion\": 3", await File.ReadAllTextAsync(path));
         Directory.Delete(_migrationDir, recursive: true);
     }
 

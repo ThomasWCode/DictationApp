@@ -4,23 +4,25 @@ using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using DictationApp.Core.Abstractions;
-using DictationApp.Core.Session;
 using DictationApp.Core.Settings;
 using DictationApp.Windows.Hotkey;
 
 namespace DictationApp.FirstRun;
 
-/// <summary>Three-step wizard: API key → microphone → hotkey. Each step can be skipped; Finish saves.</summary>
+/// <summary>
+/// Three-step wizard: API key → microphone → hotkey. Each step can be skipped; Finish saves. The hotkey step only
+/// watches the chord (<see cref="HotkeyService.ObserveOnly"/>): testing it records, uploads, pastes and stores nothing,
+/// whether or not a key is already configured.
+/// </summary>
 public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
 {
     private readonly ISettingsStore _store;
     private readonly ISecretStore _secrets;
     private readonly IHttpClientFactory _http;
     private readonly IAudioCaptureFactory _captures;
-    private readonly DictationStatusHub _hub;
     private readonly HotkeyService _hotkeys;
     private IAudioCapture? _mic;
-    private bool _wasEnabled;
+    private bool _observing;
 
     [ObservableProperty] private int _step;
     [ObservableProperty] private string _apiKey = string.Empty;
@@ -34,13 +36,12 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _hotkeyStatus = string.Empty;
     [ObservableProperty] private bool _hotkeyOk;
 
-    public FirstRunViewModel(ISettingsStore store, ISecretStore secrets, IHttpClientFactory http, IAudioCaptureFactory captures, DictationStatusHub hub, HotkeyService hotkeys)
+    public FirstRunViewModel(ISettingsStore store, ISecretStore secrets, IHttpClientFactory http, IAudioCaptureFactory captures, HotkeyService hotkeys)
     {
         _store = store;
         _secrets = secrets;
         _http = http;
         _captures = captures;
-        _hub = hub;
         _hotkeys = hotkeys;
         ChordText = store.Current.Hotkey;
         KeyValid = store.Current.HasApiKey;
@@ -48,8 +49,6 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
         {
             KeyStatus = "A key is already stored.";
         }
-
-        _hub.Changed += OnStatus;
     }
 
     public event Action? RequestClose;
@@ -79,9 +78,12 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
 
         if (value == 2)
         {
-            // Pause real dictation while the user tests the chord; we only want to see it fire.
-            _wasEnabled = _hotkeys.Enabled;
+            StartChordTest();
             HotkeyStatus = "Press and hold " + ChordText + " now…";
+        }
+        else
+        {
+            StopChordTest();
         }
     }
 
@@ -144,28 +146,42 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
     {
         if (HotkeyChord.TryParse(value, out var chord))
         {
+            // Watched under the chord being tried; the saved chord is put back when the wizard closes unless Finish saves it.
             _hotkeys.Configure(chord);
             HotkeyOk = false;
             HotkeyStatus = "Press and hold " + chord + " now…";
         }
     }
 
-    private void OnStatus(DictationStatus status)
+    private void StartChordTest()
     {
-        if (Step != 2)
+        if (_observing)
         {
             return;
         }
 
-        Application.Current?.Dispatcher.BeginInvoke(() =>
-        {
-            if (status.State is DictationState.Arming or DictationState.Recording)
-            {
-                HotkeyOk = true;
-                HotkeyStatus = "Detected! Release the keys. (Text from this test is discarded.)";
-            }
-        });
+        _observing = true;
+        _hotkeys.ChordObserved += OnChordObserved;
+        _hotkeys.ObserveOnly = true;
     }
+
+    private void StopChordTest()
+    {
+        if (!_observing)
+        {
+            return;
+        }
+
+        _observing = false;
+        _hotkeys.ObserveOnly = false;
+        _hotkeys.ChordObserved -= OnChordObserved;
+    }
+
+    private void OnChordObserved(bool down) => Application.Current?.Dispatcher.BeginInvoke(() =>
+    {
+        HotkeyOk = true;
+        HotkeyStatus = down ? "Detected! Release the keys." : "It works. Nothing was recorded.";
+    });
 
     private void StartMic()
     {
@@ -223,11 +239,10 @@ public sealed partial class FirstRunViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
-        _hub.Changed -= OnStatus;
         StopMic();
-        if (Step == 2)
-        {
-            _hotkeys.Enabled = _wasEnabled || _hotkeys.Enabled;
-        }
+        StopChordTest();
+
+        // Closing or skipping without Finish keeps the saved chord; Finish saved the tried one, which is now the saved one.
+        _hotkeys.Configure(_store.Current.HotkeyChord);
     }
 }

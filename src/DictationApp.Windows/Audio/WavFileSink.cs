@@ -1,14 +1,22 @@
 using System.IO;
 using DictationApp.Core.Abstractions;
-using NAudio.Wave;
+using DictationApp.Core.History;
 
 namespace DictationApp.Windows.Audio;
 
-/// <summary>Writes 16 kHz mono PCM16 frames to a WAV file. Thread-safe; frames arrive on the capture thread.</summary>
+/// <summary>
+/// Writes 16 kHz mono PCM16 frames to a WAV file. Thread-safe; frames arrive on the capture thread.
+/// <para>
+/// The header's sizes are written only by <see cref="Complete"/>, which the session calls once the History record that
+/// points to the file is saved. A file left by a crash, a kill or a power cut therefore still carries sizes of zero,
+/// and <see cref="HistoryMaintenance"/> recovers it at the next start instead of deleting it as an orphan.
+/// <see cref="Dispose"/> without <see cref="Complete"/> keeps that marker: it only flushes and closes.
+/// </para>
+/// </summary>
 public sealed class WavFileSink : IAudioSink
 {
     private readonly object _lock = new();
-    private WaveFileWriter? _writer;
+    private FileStream? _stream;
     private bool _closed;
 
     public WavFileSink(string path)
@@ -20,7 +28,8 @@ public sealed class WavFileSink : IAudioSink
             Directory.CreateDirectory(dir);
         }
 
-        _writer = new WaveFileWriter(path, new WaveFormat(AudioFrame.SampleRate, 16, 1));
+        _stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
+        _stream.Write(WavHeader.Create(dataBytes: 0)); // sizes of zero until Complete: the "unfinished" marker
     }
 
     public string Path { get; }
@@ -31,12 +40,12 @@ public sealed class WavFileSink : IAudioSink
     {
         lock (_lock)
         {
-            if (_closed || _writer is null)
+            if (_closed || _stream is null)
             {
                 return;
             }
 
-            _writer.Write(pcm16);
+            _stream.Write(pcm16);
             BytesWritten += pcm16.Length;
         }
     }
@@ -45,15 +54,24 @@ public sealed class WavFileSink : IAudioSink
     {
         lock (_lock)
         {
-            if (_closed)
+            if (_closed || _stream is null)
             {
                 return;
             }
 
             _closed = true;
-            _writer?.Flush();
-            _writer?.Dispose();
-            _writer = null;
+            var stream = _stream;
+            _stream = null;
+            try
+            {
+                stream.Position = 0;
+                stream.Write(WavHeader.Create(BytesWritten));
+                stream.Flush(flushToDisk: true);
+            }
+            finally
+            {
+                stream.Dispose();
+            }
         }
     }
 
@@ -62,8 +80,8 @@ public sealed class WavFileSink : IAudioSink
         lock (_lock)
         {
             _closed = true;
-            _writer?.Dispose();
-            _writer = null;
+            _stream?.Dispose();
+            _stream = null;
             try
             {
                 File.Delete(Path);
@@ -75,14 +93,15 @@ public sealed class WavFileSink : IAudioSink
         }
     }
 
+    /// <summary>Closes the file. Without <see cref="Complete"/> its header keeps the "unfinished" marker (see above).</summary>
     public void Dispose()
     {
         lock (_lock)
         {
-            if (!_closed)
-            {
-                Complete();
-            }
+            _closed = true;
+            _stream?.Flush();
+            _stream?.Dispose();
+            _stream = null;
         }
     }
 }

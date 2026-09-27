@@ -12,6 +12,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="NAudio" />
+    <PackageReference Include="Serilog.Sinks.File" />
     <PackageReference Include="FlaUI.UIA3" />
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
   </ItemGroup>
