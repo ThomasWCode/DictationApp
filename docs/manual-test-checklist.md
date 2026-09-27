@@ -69,6 +69,7 @@ runs the whole pipeline with a WAV in place of the microphone and pastes into wh
 | Re-insert | Pastes into the window that gets focus after History minimises; no stray leading space in an empty field | |
 | Re-insert with no text box focused | Toast "No text box has focus, text copied"; History status says so | |
 | Retry on a Failed record of ~30 s | Takes about 30 s; the full text (compare with Play) is copied; status CopiedOnly | |
+| Press the hotkey while that Retry runs (History window closed or open) | The bar flashes busy; no dictation starts; the Retry finishes | |
 | Retry with Wi-Fi off halfway | Toast "Retry failed"; record keeps its earlier words and stays retryable | |
 | Undo AI edit | Raw transcript copied; record marked | |
 | Retention 24 h / 14 d / forever | Old records and WAVs purged hourly and at startup | |
