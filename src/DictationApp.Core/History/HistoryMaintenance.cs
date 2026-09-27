@@ -122,7 +122,9 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     /// repaired and listed in History as Failed, so Retry can transcribe them. Nothing is uploaded or pasted. Only files
     /// last written before <paramref name="runStartedAt"/> are touched, never the file of a dictation now running. A
     /// recording shorter than <see cref="MinimumRecovered"/>, or older than the retention settings keep, is deleted.
-    /// Returns the number of recordings added to History.
+    /// A file's sizes are written only once History lists it: a database error before that leaves it unfinished, so the
+    /// next pass recovers it instead of the sweep later taking it for a finished orphan. Returns the number of recordings
+    /// added to History.
     /// </summary>
     public async Task<int> RecoverInterruptedAsync(DateTimeOffset runStartedAt, CancellationToken ct)
     {
@@ -140,7 +142,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
         {
             try
             {
-                if (File.GetLastWriteTimeUtc(file) >= runStartedAt.UtcDateTime || !WavHeader.TryRepairUnfinished(file, out var pcmBytes))
+                if (File.GetLastWriteTimeUtc(file) >= runStartedAt.UtcDateTime || !WavHeader.IsUnfinished(file, out var pcmBytes))
                 {
                     continue;
                 }
@@ -157,6 +159,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
                 referenced ??= (await history.GetReferencedAudioPathsAsync(ct).ConfigureAwait(false)).Select(FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 if (referenced.Contains(FullPath(file)))
                 {
+                    WavHeader.TryRepairUnfinished(file, out _);
                     logger.LogInformation("Repaired an unfinished recording that History already lists ({Seconds:0.0} s)", duration.TotalSeconds);
                     continue;
                 }
@@ -175,6 +178,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
                     },
                     ct).ConfigureAwait(false);
                 added++;
+                WavHeader.TryRepairUnfinished(file, out _); // now that History lists it
                 logger.LogInformation("Recovered an interrupted recording ({Seconds:0.0} s) into History for Retry", duration.TotalSeconds);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

@@ -6,6 +6,7 @@ using DictationApp.Core.Settings;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
+using NSubstitute;
 
 namespace DictationApp.Core.Tests;
 
@@ -162,6 +163,26 @@ public sealed class HistoryMaintenanceTests : IDisposable
         Assert.False(File.Exists(todayLog));
         Assert.Equal(1, _logFiles.Closes);
         Assert.Equal(new DeleteAllResult(RecordingsRemoved: lockHolds ? 2 : 3, RecordingsKept: lockHolds ? 2 : 1, LogsCleared: 2, LogsKept: 0), result);
+    }
+
+    [Fact]
+    public async Task A_database_error_during_recovery_leaves_the_recording_recoverable()
+    {
+        // The sizes are written only once History lists the recording: after a failed insert the next pass recovers
+        // it, instead of the sweep later taking a repaired but unlisted file for an orphan.
+        var runStart = Now.AddMinutes(-1);
+        var interrupted = Wav("20260926-100000-aaaaaaaa.wav", runStart.AddHours(-1), finished: false);
+        var locked = Substitute.For<IHistoryRepository>();
+        locked.GetReferencedAudioPathsAsync(Arg.Any<CancellationToken>()).Returns(Task.FromResult<IReadOnlyList<string>>([]));
+        locked.InsertAsync(Arg.Any<DictationRecord>(), Arg.Any<CancellationToken>()).Returns(Task.FromException<long>(new InvalidOperationException("database is locked")));
+        var failing = new HistoryMaintenance(locked, _settings, _paths, _clock, NullLogger<HistoryMaintenance>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => failing.RecoverInterruptedAsync(runStart, CancellationToken.None));
+        Assert.True(WavHeader.IsUnfinished(interrupted));
+
+        Assert.Equal(1, await _maintenance.RecoverInterruptedAsync(runStart, CancellationToken.None));
+        Assert.False(WavHeader.IsUnfinished(interrupted));
+        Assert.Equal(interrupted, Assert.Single(await _repo.SearchAsync(null)).AudioPath);
     }
 
     [Fact]

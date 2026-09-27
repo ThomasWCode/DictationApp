@@ -67,10 +67,29 @@ public static class WavHeader
     }
 
     /// <summary>True when <paramref name="path"/> is an unfinished recording. Reads only; the file is left as it is.</summary>
-    public static bool IsUnfinished(string path)
+    public static bool IsUnfinished(string path) => IsUnfinished(path, out _);
+
+    /// <summary>
+    /// True, with the audio byte count (cut to whole samples) that <see cref="TryRepairUnfinished"/> would write, when
+    /// <paramref name="path"/> is an unfinished recording. Reads only; the file is left as it is.
+    /// </summary>
+    public static bool IsUnfinished(string path, out long pcmBytes)
     {
+        pcmBytes = 0;
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        return TryReadLayout(stream, out var riffSize, out var dataOffset, out var dataSize) && Unfinished(riffSize, dataSize, (stream.Length - dataOffset) & ~1L);
+        if (!TryReadLayout(stream, out var riffSize, out var dataOffset, out var dataSize))
+        {
+            return false;
+        }
+
+        var pcm = (stream.Length - dataOffset) & ~1L;
+        if (!Unfinished(riffSize, dataSize, pcm))
+        {
+            return false;
+        }
+
+        pcmBytes = pcm;
+        return true;
     }
 
     /// <summary>A RIFF size of zero, or a data size of zero with audio after the header: the sizes were never written.</summary>
