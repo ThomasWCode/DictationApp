@@ -132,6 +132,24 @@ public sealed class HistoryMaintenanceTests : IDisposable
     }
 
     [Fact]
+    public async Task Recordings_found_while_history_was_empty_are_kept_once_it_has_records()
+    {
+        // A lost or recreated database: its recordings must survive the first new dictation, not only the first pass.
+        var lost = Wav("20260920-120000-bbbbbbbb.wav", Now.AddDays(-5));
+        Assert.Equal(0, (await _maintenance.RunRetentionPassAsync(null, CancellationToken.None)).RemovedFiles);
+
+        _clock.Advance(TimeSpan.FromHours(1));
+        await Record(Wav("20260926-130000-cccccccc.wav", Now), _clock.GetUtcNow());
+        var orphan = Wav("20260926-130100-dddddddd.wav", Now); // a failed save once the database was back
+        _clock.Advance(TimeSpan.FromDays(2));
+
+        await _maintenance.RunRetentionPassAsync(null, CancellationToken.None);
+
+        Assert.True(File.Exists(lost));
+        Assert.False(File.Exists(orphan));
+    }
+
+    [Fact]
     public async Task Delete_all_removes_every_recording_and_the_logs_and_keeps_only_what_is_in_use()
     {
         var referenced = Wav("20260926-115900-aaaaaaaa.wav", Now.AddSeconds(-5)); // saved moments ago

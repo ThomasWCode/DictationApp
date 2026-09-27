@@ -28,7 +28,8 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     /// run started) first lists recordings an earlier run left unfinished; then records past the history retention are
     /// deleted, audio past the audio retention is removed, and orphaned recordings are swept. Whether History was empty
     /// is judged before any of that: a lost or recreated database skips the sweep even once recovery has listed a
-    /// recording in it. A database error ends the pass (the caller retries recovery at the next pass).
+    /// recording in it, and its recordings stay out of later sweeps. A database error ends the pass (the caller retries
+    /// recovery at the next pass).
     /// </summary>
     public async Task<RetentionPass> RunRetentionPassAsync(DateTimeOffset? recoverFrom, CancellationToken ct)
     {
@@ -55,7 +56,8 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
     /// Deletes recordings no History record refers to, once older than <see cref="OrphanGrace"/>. The referenced set
     /// comes from every record, not a page of the newest ones (with more than 5,000 records the audio of older ones was
     /// deleted). An empty History (a lost or recreated database) skips the sweep rather than treat every recording as
-    /// an orphan; "Delete all" empties the folder itself. <paramref name="historyWasEmpty"/> is that judgement made
+    /// an orphan, and the recordings found then are kept by later sweeps too (<see cref="KeepCurrentRecordings"/>);
+    /// "Delete all" empties the folder itself. <paramref name="historyWasEmpty"/> is that judgement made
     /// before a retention pass changed anything (checked now when null). An unfinished recording is never swept: it is
     /// one a failed save or an interrupted run left for recovery at the next start.
     /// </summary>
@@ -71,6 +73,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
         {
             if (historyWasEmpty ?? (await history.GetStatsAsync(ct).ConfigureAwait(false)).Count == 0)
             {
+                KeepCurrentRecordings();
                 logger.LogDebug("History is empty; orphan sweep skipped");
                 return 0;
             }
@@ -83,7 +86,71 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
             return 0;
         }
 
-        return DeleteRecordings(referenced, time.GetUtcNow() - OrphanGrace, keepUnfinished: true).Deleted;
+        if (!TryReadSweepCutoff(out var keptBefore))
+        {
+            return 0;
+        }
+
+        return DeleteRecordings(referenced, time.GetUtcNow() - OrphanGrace, keepUnfinished: true, keptBefore).Deleted;
+    }
+
+    /// <summary>
+    /// History is empty, so no recording in the folder can be told from an orphan: a lost or recreated database leaves
+    /// every one of its recordings unreferenced. They are kept for good, not only while History stays empty (one new
+    /// record would let the next pass sweep them all): the time goes to <see cref="AppPaths.SweepCutoffFile"/>, and the
+    /// sweep leaves anything written before it. "Delete all" removes them, and the file.
+    /// </summary>
+    private void KeepCurrentRecordings()
+    {
+        try
+        {
+            if (!Directory.EnumerateFiles(paths.AudioDirectory, "*.wav").Any())
+            {
+                return;
+            }
+
+            var now = time.GetUtcNow();
+            if (TryReadSweepCutoff(out var saved) && saved >= now.UtcDateTime)
+            {
+                return;
+            }
+
+            File.WriteAllText(paths.SweepCutoffFile, now.ToString("O", CultureInfo.InvariantCulture));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "Could not save which recordings the orphan sweep must keep");
+        }
+    }
+
+    /// <summary>
+    /// The time before which the sweep keeps every recording (null: none is kept that way). False when the saved time
+    /// cannot be read: the sweep then deletes nothing.
+    /// </summary>
+    private bool TryReadSweepCutoff(out DateTime? keptBeforeUtc)
+    {
+        keptBeforeUtc = null;
+        try
+        {
+            if (!File.Exists(paths.SweepCutoffFile))
+            {
+                return true;
+            }
+
+            if (DateTimeOffset.TryParse(File.ReadAllText(paths.SweepCutoffFile).Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var at))
+            {
+                keptBeforeUtc = at.UtcDateTime;
+                return true;
+            }
+
+            logger.LogWarning("The orphan sweep's cutoff could not be read; nothing is swept");
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogWarning(ex, "The orphan sweep's cutoff could not be read; nothing is swept");
+            return false;
+        }
     }
 
     /// <summary>
@@ -112,6 +179,15 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
         }
 
         var rest = DeleteRecordings(new HashSet<string>(StringComparer.OrdinalIgnoreCase), time.GetUtcNow() - ActiveRecordingGrace, keepUnfinished: false);
+        try
+        {
+            File.Delete(paths.SweepCutoffFile); // the recordings it kept are gone
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug(ex, "Could not delete the orphan sweep's cutoff");
+        }
+
         var (logsRemoved, logsKept) = logFiles is null ? ClearLogs() : logFiles.WhileClosed(ClearLogs);
         logger.LogInformation("Delete all: {Removed} recordings removed, {Kept} kept, {Logs} log files cleared, {LogsKept} not", removed + rest.Deleted, kept + rest.Kept, logsRemoved, logsKept);
         return new DeleteAllResult(removed + rest.Deleted, kept + rest.Kept, logsRemoved, logsKept);
@@ -231,7 +307,7 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
         return count;
     }
 
-    private (int Deleted, int Kept) DeleteRecordings(HashSet<string> referenced, DateTimeOffset olderThan, bool keepUnfinished)
+    private (int Deleted, int Kept) DeleteRecordings(HashSet<string> referenced, DateTimeOffset olderThan, bool keepUnfinished, DateTime? keptBeforeUtc = null)
     {
         if (!Directory.Exists(paths.AudioDirectory))
         {
@@ -251,6 +327,11 @@ public sealed class HistoryMaintenance(IHistoryRepository history, ISettingsStor
             try
             {
                 written = File.GetLastWriteTimeUtc(file);
+                if (written < keptBeforeUtc)
+                {
+                    continue; // in the folder while History was empty (KeepCurrentRecordings)
+                }
+
                 if (keepUnfinished && WavHeader.IsUnfinished(file))
                 {
                     continue;
