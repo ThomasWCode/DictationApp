@@ -99,6 +99,39 @@ public class InsertionTextFormatterTests
     }
 
     [Fact]
+    public void Keys_typed_after_an_insertion_decide_what_the_memory_says()
+    {
+        var f = new InsertionTextFormatter();
+        f.Format("hello", 1);                          // the control cannot be read: remembered
+        f.Typed(1, TypedKey.Character);                // the user typed "x" after it
+        Assert.Equal(" world", f.Format("world", 1));  // "hellox world", not "helloxworld"
+
+        f.Typed(1, TypedKey.LineBreak);                // Enter: a new line, or the message was sent
+        Assert.Equal("Next", f.Format("next", 1));
+
+        f.Typed(1, TypedKey.Space);
+        Assert.Equal("more", f.Format("more", 1));
+
+        f.Typed(1, TypedKey.Erase);                    // Backspace: a character most likely still shows before the caret
+        Assert.Equal(" again", f.Format("again", 1));
+
+        f.Typed(2, TypedKey.Character);                // nothing was inserted into window 2: nothing to follow there
+        Assert.Equal("fresh", f.Format("fresh", 2));
+    }
+
+    [Fact]
+    public void A_key_typed_after_the_memory_expired_does_not_revive_it()
+    {
+        var clock = new FakeTimeProvider();
+        var f = new InsertionTextFormatter(clock) { Memory = TimeSpan.FromMinutes(10) };
+        f.Format("hello", 1);
+        clock.Advance(TimeSpan.FromMinutes(11));
+        f.Typed(1, TypedKey.Character);
+
+        Assert.Equal("world", f.Format("world", 1));
+    }
+
+    [Fact]
     public void Reset_clears_memory()
     {
         var f = new InsertionTextFormatter();

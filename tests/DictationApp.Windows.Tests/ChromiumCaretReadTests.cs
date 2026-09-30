@@ -43,6 +43,8 @@ public sealed class ChromiumCaretReadTests : IDisposable
         ("inline-editor-caret-at-start", "inl", false),
         ("textarea-after-label", "ta2", false),
         ("slate-placeholder", "slate", false),
+        ("textarea-with-placeholder-class", "ta3", true),
+        ("editor-root-with-placeholder-class", "ce", true),
     ];
 
     private const string Page = """
@@ -65,6 +67,8 @@ public sealed class ChromiumCaretReadTests : IDisposable
         <p>Note:<span id="inl" class="inline" contenteditable="true" role="textbox" aria-label="inl">later text</span></p>
         <p><label>Message:<textarea id="ta2" class="inline" aria-label="ta2"></textarea></label></p>
         <div id="slate" class="ed" contenteditable="true" role="textbox" aria-label="slate"></div>
+        <textarea id="ta3" class="placeholder" aria-label="ta3"></textarea>
+        <div id="ce" class="placeholder ed" contenteditable="true" role="textbox" aria-label="ce">Existing text</div>
         <script>
           const $ = id => document.getElementById(id);
           const ed = $("tiptap"), q = $("quill"), ta = $("ta"), slate = $("slate");
@@ -98,6 +102,8 @@ public sealed class ChromiumCaretReadTests : IDisposable
               slate.innerHTML = '<p><span><span contenteditable="false" style="position:absolute;pointer-events:none;opacity:.4">Type a message</span><span>﻿<br></span></span></p>';
               slate.focus(); caretAt(slate.firstChild.firstChild.lastChild.firstChild, 0);
             },
+            "textarea-with-placeholder-class": () => { $("ta3").value = "Hello world"; $("ta3").focus(); $("ta3").setSelectionRange(11, 11); },
+            "editor-root-with-placeholder-class": () => { const c = $("ce"); c.focus(); caretAt(c.firstChild, c.firstChild.length); },
           };
           const order = ORDER;
           let i = 0;

@@ -340,46 +340,63 @@ public sealed class HotkeyServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Keys_that_reach_the_app_report_the_window_they_went_to()
+    public async Task Keys_that_reach_the_app_report_what_they_leave_before_the_caret()
     {
         _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
         _service.ForegroundWindow = () => 42;
-        _service.KeyTyped += w => Add("typed:" + w);
+        _service.KeyTyped += (w, k) => Add($"typed:{w}:{k}");
 
         Assert.False(Key('A', true));    // typed into the app, never swallowed
         Key('A', false);
-        Key(0x0D, true);                 // Enter: a chat app sends the message
-        Key(0x0D, false);
-        Key(HotkeyChord.VkLShift, true); // Shift+Home: the modifier alone is not typing, the key with it is
-        Key(0x24, true);
-        Key(0x24, false);
+        Tap('7');
+        Tap(0xBE);                       // the full stop key
+        Tap(HotkeyChord.VkSpace);
+        Tap(0x08);                       // Backspace
+        Tap(0x0D);                       // Enter: a chat app sends the message
+        Key(HotkeyChord.VkLShift, true); // Shift+A and Shift+Enter: still a character and a line break
+        Tap('A');
+        Tap(0x0D);
         Key(HotkeyChord.VkLShift, false);
 
-        Assert.Equal(["typed:42", "typed:42", "typed:42"], await EventsAsync());
+        Assert.Equal(
+            ["typed:42:Character", "typed:42:Character", "typed:42:Character", "typed:42:Space", "typed:42:Erase", "typed:42:LineBreak", "typed:42:Character", "typed:42:LineBreak"],
+            await EventsAsync());
     }
 
     [Fact]
-    public async Task Modifiers_the_chord_injected_keys_and_keys_swallowed_while_holding_are_not_typing()
+    public async Task Keys_whose_effect_is_unknown_or_that_never_reach_the_app_report_nothing()
     {
         _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
         _service.ForegroundWindow = () => 42;
-        _service.KeyTyped += w => Add("typed:" + w);
+        _service.KeyTyped += (w, k) => Add($"typed:{w}:{k}");
 
-        Key(HotkeyChord.VkLShift, true);
-        Key(HotkeyChord.VkLShift, false);
-        Key(HotkeyChord.VkCapsLock, true);
-        Key(HotkeyChord.VkCapsLock, false);
-        Key('B', true, injected: true);  // our own paste keystrokes
+        Tap(HotkeyChord.VkLShift);
+        Tap(HotkeyChord.VkCapsLock);
+        Tap(0x24);                         // Home
+        Tap(HotkeyChord.VkLeft);
+        Tap(0x2E);                         // Delete
+        Tap(HotkeyChord.VkEscape);
+        Tap(0x74);                         // F5
+        Key(HotkeyChord.VkLControl, true); // Ctrl+C: a shortcut, whatever it does
+        Tap('C');
+        Key(HotkeyChord.VkLControl, false);
+        Key('B', true, injected: true);    // our own paste keystrokes
         Key('B', false, injected: true);
         Key(HotkeyChord.VkLControl, true);
         Key(HotkeyChord.VkLAlt, true);
-        Assert.True(Key('D', true));     // blocked while the chord is held: it never reaches the app
+        Assert.True(Key('D', true));       // blocked while the chord is held: it never reaches the app
         Key('D', false);
         Advance(1000);
         Key(HotkeyChord.VkLAlt, false);
         Key(HotkeyChord.VkLControl, false);
 
         Assert.Equal(["down", "up"], await EventsAsync());
+    }
+
+    private void Tap(int vk)
+    {
+        Key(vk, true);
+        Key(vk, false);
     }
 
     [Fact]

@@ -196,8 +196,11 @@ public sealed class FocusedEditableDetector : IDisposable
     {
         try
         {
+            // The element enclosing the caret can be the field itself (a textarea, text directly in an editor): its classes
+            // are the editor's, and block-only markers such as "placeholder" prove nothing there.
             var block = caret.GetEnclosingElement();
-            var marked = EmptyFieldMarkers.TextBeforeCaret(focused.Properties.ClassName.ValueOrDefault, block?.Properties.ClassName.ValueOrDefault);
+            var blockClass = block is not null && !block.Equals(focused) ? block.Properties.ClassName.ValueOrDefault : null;
+            var marked = EmptyFieldMarkers.TextBeforeCaret(focused.Properties.ClassName.ValueOrDefault, blockClass);
             if (marked is not null)
             {
                 return marked;

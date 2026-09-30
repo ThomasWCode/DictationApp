@@ -1510,11 +1510,11 @@ public sealed class DictationOrchestrator : BackgroundService
     private void OnArrow(ArrowDirection direction) => _events.Writer.TryWrite(new ControlEvent(ControlKind.Arrow, direction));
 
     /// <summary>
-    /// The user pressed a key in <paramref name="window"/>: the memory of what we inserted there no longer says what is
-    /// before the caret. Without this, a chat box whose caret cannot be read got a leading space after a message was sent
-    /// with Enter, because the memory still ended with the sent message's full stop.
+    /// The user pressed a key in <paramref name="window"/>: the memory of what is before the caret there follows it.
+    /// Without this, a chat box whose caret cannot be read got a leading space after a message was sent with Enter,
+    /// because the memory still ended with the sent message's full stop.
     /// </summary>
-    private void OnKeyTyped(nint window) => _formatter.Reset(window);
+    private void OnKeyTyped(nint window, TypedKey key) => _formatter.Typed(window, key);
 
     private void OnToneOverride(Tone tone) => _events.Writer.TryWrite(new ControlEvent(ControlKind.ToneOverride, Tone: tone));
 
