@@ -668,19 +668,24 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task A_key_pressed_in_the_window_forgets_what_was_inserted_there()
+    public async Task Keys_pressed_in_the_window_update_what_the_memory_says_is_before_the_caret()
     {
         await StartAsync();
         var window = _foreground.Context.WindowHandle;
         await DictateAsync("First message.");  // the control cannot be read: remembered, the next text would be joined
-        _hotkey.Type(window);                  // Enter: the message was sent and the box is empty
+        _hotkey.Type(window, TypedKey.LineBreak); // Enter: the message was sent and the box is empty
 
-        await DictateAsync("Second message.");
-        Assert.Equal("Second message. [cleaned]", _inserter.LastText);
+        await DictateAsync("second message.");
+        Assert.Equal("Second message. [cleaned]", _inserter.LastText); // no space, and a capital after the line break
 
-        _hotkey.Type(window + 1);              // a key in another window leaves this one's memory alone
-        await DictateAsync("Third.");
-        Assert.Equal(" Third. [cleaned]", _inserter.LastText);
+        _hotkey.Type(window, TypedKey.LineBreak);
+        _hotkey.Type(window, TypedKey.Character); // a word typed on the new line: the next text is joined to it
+        await DictateAsync("third.");
+        Assert.Equal(" third. [cleaned]", _inserter.LastText);
+
+        _hotkey.Type(window + 1, TypedKey.LineBreak); // a key in another window leaves this one's memory alone
+        await DictateAsync("Fourth.");
+        Assert.Equal(" Fourth. [cleaned]", _inserter.LastText);
     }
 
     [Fact]
@@ -1162,7 +1167,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public event Action<ArrowDirection>? ArrowPressed;
 
-        public event Action<nint>? KeyTyped;
+        public event Action<nint, TypedKey>? KeyTyped;
 
         public bool IsChordHeld { get; private set; }
 
@@ -1188,7 +1193,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public void Arrow(ArrowDirection d) => ArrowPressed?.Invoke(d);
 
-        public void Type(nint window) => KeyTyped?.Invoke(window);
+        public void Type(nint window, TypedKey key) => KeyTyped?.Invoke(window, key);
     }
 
     private sealed class FakeCapture : IAudioCapture

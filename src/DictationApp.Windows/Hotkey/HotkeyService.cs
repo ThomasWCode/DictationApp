@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using DictationApp.Core.Abstractions;
+using DictationApp.Core.Insertion;
 using DictationApp.Core.Session;
 using DictationApp.Core.Settings;
 using DictationApp.Windows.Native;
@@ -38,8 +39,9 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
     public static readonly TimeSpan TapThreshold = TimeSpan.FromMilliseconds(300);
     public static readonly TimeSpan DoubleTapWindow = TimeSpan.FromMilliseconds(400);
 
-    private const int VkNumLock = 0x90;
-    private const int VkScrollLock = 0x91;
+    private const int VkBack = 0x08;
+    private const int VkTab = 0x09;
+    private const int VkReturn = 0x0D;
 
     private readonly LowLevelKeyboardHook _hook;
     private readonly DictationStatusHub _hub;
@@ -83,7 +85,7 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     public event Action<ArrowDirection>? ArrowPressed;
 
-    public event Action<nint>? KeyTyped;
+    public event Action<nint, TypedKey>? KeyTyped;
 
     /// <summary>Raised instead of ChordDown/ChordUp while <see cref="ObserveOnly"/> is set: true on press, false on release.</summary>
     public event Action<bool>? ChordObserved;
@@ -209,12 +211,13 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
                 return true;
             }
 
-            if (!isChordKey && !IsModifierOrLock(vk))
+            var shortcut = _down.Contains(HotkeyChord.VkControl) || _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkLWin);
+            if (!isChordKey && Typed(vk, shortcut) is { } typed)
             {
-                // The key reaches the app: what is before its caret may have changed. Called on the hook thread, so only
-                // the window is looked up here; the event itself is raised from the dispatch loop.
+                // The key reaches the app and changes what is before its caret. Called on the hook thread, so only the
+                // window is looked up here; the event itself is raised from the dispatch loop.
                 var window = ForegroundWindow();
-                Raise(() => KeyTyped?.Invoke(window));
+                Raise(() => KeyTyped?.Invoke(window, typed));
             }
 
             if (!isChordKey && (_down.Contains(HotkeyChord.VkLWin) || _down.Contains(HotkeyChord.VkControl) || _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkShift)))
@@ -274,10 +277,32 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
         }
     }
 
-    /// <summary>Keys that change neither the text nor the caret on their own (a shortcut's other key does count).</summary>
-    private static bool IsModifierOrLock(int vk) =>
-        vk is HotkeyChord.VkShift or HotkeyChord.VkControl or HotkeyChord.VkAlt or HotkeyChord.VkLWin or HotkeyChord.VkCapsLock
-            or VkNumLock or VkScrollLock;
+    /// <summary>
+    /// What <paramref name="vk"/> leaves before the caret, or null when the key alone does not tell: Enter (with any
+    /// modifier) a line break; with Ctrl, Alt or Win held, anything else is a shortcut; Space and Tab a space; Backspace
+    /// probably a character; letters, digits and punctuation (Shift allowed) a character. Arrows, Delete, Escape,
+    /// function keys and modifiers change nothing that can be told.
+    /// </summary>
+    private static TypedKey? Typed(int vk, bool shortcut)
+    {
+        if (vk == VkReturn)
+        {
+            return TypedKey.LineBreak;
+        }
+
+        if (shortcut)
+        {
+            return null;
+        }
+
+        return vk switch
+        {
+            HotkeyChord.VkSpace or VkTab => TypedKey.Space,
+            VkBack => TypedKey.Erase,
+            (>= 0x30 and <= 0x39) or (>= 0x41 and <= 0x5A) or (>= 0x60 and <= 0x6F) or (>= 0xBA and <= 0xC0) or (>= 0xDB and <= 0xDF) or 0xE2 => TypedKey.Character,
+            _ => null,
+        };
+    }
 
     private bool ChordFullyDown()
     {

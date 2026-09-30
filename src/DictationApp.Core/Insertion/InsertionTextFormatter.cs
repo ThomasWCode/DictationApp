@@ -13,6 +13,22 @@ public enum SpacingBasis
     Memory,
 }
 
+/// <summary>What a key the user pressed leaves before the caret, as far as the key alone tells (see <see cref="InsertionTextFormatter.Typed"/>).</summary>
+public enum TypedKey
+{
+    /// <summary>A character that shows: a letter, digit or punctuation mark.</summary>
+    Character,
+
+    /// <summary>Backspace: it removed a character, and one usually still shows before the caret.</summary>
+    Erase,
+
+    /// <summary>Space or Tab.</summary>
+    Space,
+
+    /// <summary>Enter, with or without a modifier: a new line, or a message sent and its box emptied.</summary>
+    LineBreak,
+}
+
 /// <param name="Text">The text to insert, with its joining space and capital.</param>
 /// <param name="Basis">Where the character before the insertion came from.</param>
 /// <param name="Tail">That character, or null when there is none (the start of a field).</param>
@@ -26,6 +42,9 @@ public readonly record struct FormattedInsertion(string Text, SpacingBasis Basis
 /// </summary>
 public sealed class InsertionTextFormatter
 {
+    /// <summary>Stands in for a character the user typed, or one Backspace left: it shows, so a dictation is joined with a space.</summary>
+    private const string TypedCharacter = "a";
+
     private readonly Dictionary<nint, (string Tail, DateTimeOffset At)> _lastByWindow = [];
     private readonly TimeProvider _time;
     private readonly object _lock = new();
@@ -73,7 +92,34 @@ public sealed class InsertionTextFormatter
         }
     }
 
-    /// <summary>Forget what was inserted into <paramref name="windowHandle"/> (e.g. the user typed in between).</summary>
+    /// <summary>
+    /// The user pressed <paramref name="key"/> in <paramref name="windowHandle"/> after something was inserted there: the
+    /// memory now holds what that key left before the caret (a line break after Enter, a space, a character) instead of
+    /// the end of the insertion, so a message sent with Enter is not followed by a space and a word typed in between
+    /// still is. A window with nothing remembered is left alone: the memory only joins dictations in controls whose caret
+    /// cannot be read.
+    /// </summary>
+    public void Typed(nint windowHandle, TypedKey key)
+    {
+        lock (_lock)
+        {
+            var now = _time.GetUtcNow();
+            if (!_lastByWindow.TryGetValue(windowHandle, out var last) || now - last.At > Memory)
+            {
+                return;
+            }
+
+            var tail = key switch
+            {
+                TypedKey.LineBreak => "\n",
+                TypedKey.Space => " ",
+                _ => TypedCharacter,
+            };
+            _lastByWindow[windowHandle] = (tail, now);
+        }
+    }
+
+    /// <summary>Forget what was inserted into <paramref name="windowHandle"/> (the text did not arrive there).</summary>
     public void Reset(nint windowHandle)
     {
         lock (_lock)

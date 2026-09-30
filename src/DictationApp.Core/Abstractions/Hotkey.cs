@@ -1,3 +1,4 @@
+using DictationApp.Core.Insertion;
 using DictationApp.Core.Settings;
 
 namespace DictationApp.Core.Abstractions;
@@ -41,11 +42,12 @@ public interface IHotkeyService
     event Action<ArrowDirection>? ArrowPressed;
 
     /// <summary>
-    /// A key that reaches the app went down in the window given (the foreground window): not a modifier, not the chord,
-    /// not a key swallowed while the chord is held, not injected. What is before the caret there may have changed (a
-    /// message sent with Enter, a word typed, the caret moved), so the memory of the last insertion no longer says.
+    /// A key that reaches the app went down in the window given (the foreground window), and what it leaves before the
+    /// caret: a character, Backspace, a space or a line break (Enter: a new line, or a message sent). Keys whose effect
+    /// the key alone does not tell (the arrows, Delete, shortcuts with Ctrl, Alt or Win, function keys) raise nothing,
+    /// nor do modifiers, the chord, keys swallowed while the chord is held and injected keys.
     /// </summary>
-    event Action<nint>? KeyTyped;
+    event Action<nint, TypedKey>? KeyTyped;
 
     bool IsChordHeld { get; }
 
