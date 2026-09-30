@@ -668,6 +668,42 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_key_pressed_in_the_window_forgets_what_was_inserted_there()
+    {
+        await StartAsync();
+        var window = _foreground.Context.WindowHandle;
+        await DictateAsync("First message.");  // the control cannot be read: remembered, the next text would be joined
+        _hotkey.Type(window);                  // Enter: the message was sent and the box is empty
+
+        await DictateAsync("Second message.");
+        Assert.Equal("Second message. [cleaned]", _inserter.LastText);
+
+        _hotkey.Type(window + 1);              // a key in another window leaves this one's memory alone
+        await DictateAsync("Third.");
+        Assert.Equal(" Third. [cleaned]", _inserter.LastText);
+    }
+
+    [Fact]
+    public async Task Text_left_on_the_clipboard_to_paste_by_hand_has_no_joining_space()
+    {
+        await StartAsync();
+        await DictateAsync("First.");          // remembered: the next text is joined with a space
+
+        // The paste could not be confirmed, so the text stays on the clipboard: the user may paste it into an empty box.
+        _inserter.Result = new InsertionResult(InsertionOutcome.Inserted, "Pasted into notepad; also on the clipboard", LeftOnClipboard: true);
+        await DictateAsync("Second.");
+        Assert.Equal(" Second. [cleaned]", _inserter.LastText); // the paste itself keeps its joining space
+        Assert.Equal("Second. [cleaned]", _clipboard.Text);
+
+        // The paste could not be sent at all: the same, and History keeps what was copied.
+        _inserter.Result = new InsertionResult(InsertionOutcome.CopiedOnly, "Could not bring notepad to the front, text copied");
+        await DictateAsync("Third.");
+        Assert.Equal(" Third. [cleaned]", _inserter.LastText);
+        Assert.Equal("Third. [cleaned]", _clipboard.Text);
+        Assert.Equal("Third. [cleaned]", _history.Records[^1].InsertedText);
+    }
+
+    [Fact]
     public async Task A_paste_that_could_not_be_confirmed_leaves_the_text_on_the_clipboard_too()
     {
         _inserter.Result = new InsertionResult(InsertionOutcome.Inserted, "Pasted into notepad; also on the clipboard", LeftOnClipboard: true);
@@ -1126,6 +1162,8 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public event Action<ArrowDirection>? ArrowPressed;
 
+        public event Action<nint>? KeyTyped;
+
         public bool IsChordHeld { get; private set; }
 
         public bool Enabled { get; set; } = true;
@@ -1149,6 +1187,8 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         public void Escape() => EscapePressed?.Invoke();
 
         public void Arrow(ArrowDirection d) => ArrowPressed?.Invoke(d);
+
+        public void Type(nint window) => KeyTyped?.Invoke(window);
     }
 
     private sealed class FakeCapture : IAudioCapture

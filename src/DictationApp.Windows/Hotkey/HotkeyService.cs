@@ -38,6 +38,9 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
     public static readonly TimeSpan TapThreshold = TimeSpan.FromMilliseconds(300);
     public static readonly TimeSpan DoubleTapWindow = TimeSpan.FromMilliseconds(400);
 
+    private const int VkNumLock = 0x90;
+    private const int VkScrollLock = 0x91;
+
     private readonly LowLevelKeyboardHook _hook;
     private readonly DictationStatusHub _hub;
     private readonly ILogger<HotkeyService> _logger;
@@ -80,6 +83,8 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     public event Action<ArrowDirection>? ArrowPressed;
 
+    public event Action<nint>? KeyTyped;
+
     /// <summary>Raised instead of ChordDown/ChordUp while <see cref="ObserveOnly"/> is set: true on press, false on release.</summary>
     public event Action<bool>? ChordObserved;
 
@@ -118,6 +123,9 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     /// <summary>Runs an action once after a delay (the double-tap window); replaceable so tests control time.</summary>
     internal Func<TimeSpan, Action, IDisposable> Schedule { get; set; } = static (due, action) => new Timer(_ => action(), null, due, Timeout.InfiniteTimeSpan);
+
+    /// <summary>The window a key goes to, for <see cref="KeyTyped"/>; replaceable in tests.</summary>
+    internal Func<nint> ForegroundWindow { get; set; } = NativeMethods.GetForegroundWindow;
 
     public void Start() => _hook.Start();
 
@@ -201,6 +209,14 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
                 return true;
             }
 
+            if (!isChordKey && !IsModifierOrLock(vk))
+            {
+                // The key reaches the app: what is before its caret may have changed. Called on the hook thread, so only
+                // the window is looked up here; the event itself is raised from the dispatch loop.
+                var window = ForegroundWindow();
+                Raise(() => KeyTyped?.Invoke(window));
+            }
+
             if (!isChordKey && (_down.Contains(HotkeyChord.VkLWin) || _down.Contains(HotkeyChord.VkControl) || _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkShift)))
             {
                 // A modifier is combined with something else: this is an OS/app shortcut, not our chord.
@@ -257,6 +273,11 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
                 return true;
         }
     }
+
+    /// <summary>Keys that change neither the text nor the caret on their own (a shortcut's other key does count).</summary>
+    private static bool IsModifierOrLock(int vk) =>
+        vk is HotkeyChord.VkShift or HotkeyChord.VkControl or HotkeyChord.VkAlt or HotkeyChord.VkLWin or HotkeyChord.VkCapsLock
+            or VkNumLock or VkScrollLock;
 
     private bool ChordFullyDown()
     {

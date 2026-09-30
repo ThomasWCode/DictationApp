@@ -1,6 +1,7 @@
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
+using FlaUI.Core.Patterns;
 using FlaUI.UIA3;
 using DictationApp.Windows.Native;
 using Microsoft.Extensions.Logging;
@@ -22,6 +23,9 @@ public sealed class FocusedEditableDetector : IDisposable
 
     /// <summary>Characters read before the caret: enough to see past an invisible stand-in or two.</summary>
     private const int CaretContextLength = 4;
+
+    /// <summary>Characters of the caret's line read to decide whether anything is on it.</summary>
+    private const int LineProbeLength = 256;
 
     private static readonly HashSet<string> Allowlist = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -78,12 +82,13 @@ public sealed class FocusedEditableDetector : IDisposable
 
     /// <summary>
     /// The last few characters before the caret of the focused control, from the Text pattern (the caret or
-    /// selection start). The caller checks that the target window has focus: the control itself may belong to another
-    /// process (WebView2 content runs in msedgewebview2). "" at the start of a field,
-    /// or when a control without a caret position (Value pattern only, a Chromium contenteditable reporting no caret)
-    /// is empty, or when a Chromium editor shows the placeholder of an empty box (see <see cref="EmptyFieldMarkers"/>:
-    /// that placeholder is not text before the caret). Null otherwise: password fields, text whose caret position is
-    /// unknown, controls with neither pattern, and when UI Automation does not answer in time.
+    /// selection start), never from before the start of the control. The caller checks that the target window has
+    /// focus: the control itself may belong to another process (WebView2 content runs in msedgewebview2). "" at the
+    /// start of a field, or when a control without a caret position (Value pattern only, a Chromium contenteditable
+    /// reporting no caret) is empty. In a Chromium editor, "" or a line break when the caret is in an empty box or on an
+    /// empty line, whatever placeholder it shows (a placeholder is not text before the caret; see
+    /// <see cref="EmptyFieldMarkers"/>). Null otherwise: password fields, text whose caret position is unknown, controls
+    /// with neither pattern, and when UI Automation does not answer in time.
     /// </summary>
     public string? ReadTextBeforeCaret()
     {
@@ -132,14 +137,17 @@ public sealed class FocusedEditableDetector : IDisposable
             return null;
         }
 
+        // Chromium (Chrome, Edge, Electron apps such as the Claude app) needs checks of its own; see EmptyFieldMarkers.
+        var chromium = focused.Properties.FrameworkId.ValueOrDefault == EmptyFieldMarkers.ChromiumFramework;
+
         if (focused.Patterns.Text.IsSupported)
         {
             var pattern = focused.Patterns.Text.Pattern;
             var selection = pattern.GetSelection();
             if (selection.Length > 0)
             {
-                // A Chromium editor's placeholder reads as text before the caret, but the box it sits in is empty.
-                if (EmptyBlockText(focused, selection[0]) is { } empty)
+                // A Chromium editor's placeholder reads as text before the caret, but the line it sits on is empty.
+                if (chromium && EmptyLineText(focused, pattern, selection[0]) is { } empty)
                 {
                     return empty;
                 }
@@ -147,11 +155,21 @@ public sealed class FocusedEditableDetector : IDisposable
                 var before = selection[0].Clone();
                 before.MoveEndpointByUnit(TextPatternRangeEndpoint.Start, TextUnit.Character, -CaretContextLength);
                 before.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection[0], TextPatternRangeEndpoint.Start);
+
+                // Never past the start of the control: Chromium lets the range run back into the page before the field,
+                // so a caret at the start of a field would read the end of whatever text comes before it on the page.
+                var document = pattern.DocumentRange;
+                if (before.CompareEndpoints(TextPatternRangeEndpoint.Start, document, TextPatternRangeEndpoint.Start) < 0)
+                {
+                    before.MoveEndpointByRange(TextPatternRangeEndpoint.Start, document, TextPatternRangeEndpoint.Start);
+                }
+
                 return before.GetText(CaretContextLength) ?? string.Empty;
             }
 
-            // No caret reported (an empty contenteditable in Chromium): an empty document is the start of the field.
-            if (IsBlank(pattern.DocumentRange.GetText(CaretContextLength)))
+            // No caret reported (an empty contenteditable in Chromium): an empty document is the start of the field, and so
+            // is an editor that marks itself empty although its placeholder fills the document.
+            if (IsBlank(pattern.DocumentRange.GetText(CaretContextLength)) || (chromium && EditorMarkedEmpty(focused)))
             {
                 return string.Empty;
             }
@@ -167,19 +185,17 @@ public sealed class FocusedEditableDetector : IDisposable
     }
 
     /// <summary>
-    /// In a Chromium editor: "" or a line break when the caret is in a block the editor marks as empty, else null (read the
-    /// text as usual). Chromium exposes each element's HTML classes as its ClassName; see <see cref="EmptyFieldMarkers"/>.
-    /// Only Chromium is asked, and a failed check leaves the ordinary read alone rather than losing it.
+    /// In a Chromium editor: "" (the start of the field) or a line break (the start of a line) when the caret is on a line
+    /// with nothing on it, else null (read the text as usual). Three signs, in order: the classes an editor puts on an
+    /// empty box or block (see <see cref="EmptyFieldMarkers"/>); a caret line with no text on it, which covers editors
+    /// without such classes (a placeholder drawn by CSS is not part of the line); a block holding only ProseMirror's
+    /// trailing-break marker, for a placeholder element that is part of the line. A failed check leaves the ordinary read
+    /// alone rather than losing it.
     /// </summary>
-    private static string? EmptyBlockText(AutomationElement focused, ITextRange caret)
+    private static string? EmptyLineText(AutomationElement focused, ITextPattern pattern, ITextRange caret)
     {
         try
         {
-            if (focused.Properties.FrameworkId.ValueOrDefault != EmptyFieldMarkers.ChromiumFramework)
-            {
-                return null;
-            }
-
             var block = caret.GetEnclosingElement();
             var marked = EmptyFieldMarkers.TextBeforeCaret(focused.Properties.ClassName.ValueOrDefault, block?.Properties.ClassName.ValueOrDefault);
             if (marked is not null)
@@ -187,7 +203,13 @@ public sealed class FocusedEditableDetector : IDisposable
                 return marked;
             }
 
-            // ProseMirror editors whose placeholder carries no class still put a marker element in every empty block.
+            var line = caret.Clone();
+            line.ExpandToEnclosingUnit(TextUnit.Line);
+            if (IsBlank(line.GetText(LineProbeLength)))
+            {
+                return line.CompareEndpoints(TextPatternRangeEndpoint.Start, pattern.DocumentRange, TextPatternRangeEndpoint.Start) <= 0 ? string.Empty : "\n";
+            }
+
             return block is not null
                 && block.Properties.ControlType.ValueOrDefault == ControlType.Group
                 && block.FindFirstChild(f => f.ByClassName(EmptyFieldMarkers.TrailingBreakClass)) is not null
@@ -197,6 +219,29 @@ public sealed class FocusedEditableDetector : IDisposable
         catch (Exception)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// A Chromium editor that reports no caret but marks itself empty: Quill on the editor, TipTap on its first block
+    /// (<c>is-editor-empty</c>, set only while the whole editor is empty). The first block is looked up in the raw view:
+    /// Chromium leaves paragraphs out of the ordinary (control) view, whose first child is the placeholder's text.
+    /// </summary>
+    private static bool EditorMarkedEmpty(AutomationElement focused)
+    {
+        try
+        {
+            if (EmptyFieldMarkers.TextBeforeCaret(focused.Properties.ClassName.ValueOrDefault, null) == string.Empty)
+            {
+                return true;
+            }
+
+            var first = focused.Automation.TreeWalkerFactory.GetRawViewWalker().GetFirstChild(focused);
+            return first is not null && EmptyFieldMarkers.TextBeforeCaret(null, first.Properties.ClassName.ValueOrDefault) == string.Empty;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 

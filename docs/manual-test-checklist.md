@@ -20,6 +20,9 @@ runs the whole pipeline with a WAV in place of the microphone and pastes into wh
 | Claude desktop app and claude.ai (TipTap): dictate into the empty prompt box, send, dictate again | No leading space either time (the log says `Spacing in ...: basis=Caret tail=none space=False`); a second dictation into the same box is joined with one space | |
 | Claude prompt box: Shift+Enter for a new line, then dictate | No space at the start of the new line | |
 | ChatGPT and a Quill editor (Gemini, Slack in Chrome), empty box | No leading space | |
+| Claude app: start a new chat (empty box on the home screen), dictate | No leading space | |
+| A form field right after a label on the same line (e.g. "Name: [box]"), empty or with the caret at its start | No leading space | |
+| Chromium caret reads, automated | `dotnet test tests/DictationApp.Windows.Tests --filter Category=Interactive` passes (opens an offscreen Chrome or Edge window for about a minute) | |
 | Chrome/Edge: address bar (omnibox) | Inserted into omnibox | |
 | Teams, Slack, WhatsApp desktop | Electron; default tone chip (Casual only if you added an app rule) | |
 | VS Code | Level None (no LLM call, see log) | |
@@ -70,6 +73,7 @@ runs the whole pipeline with a WAV in place of the microphone and pastes into wh
 | Every dictation listed with playable WAV | Play/Stop works | |
 | Search | Prefix search over raw and inserted text | |
 | Re-insert | Pastes into the window that gets focus after History minimises; no stray leading space in an empty field | |
+| Copy a dictation that was added after existing text, paste it into an empty box | No leading space (History itself still shows the joining space it was inserted with) | |
 | Re-insert with no text box focused | Toast "No text box has focus, text copied"; History status says so | |
 | Retry on a Failed record of ~30 s | Takes about 30 s; the full text (compare with Play) is copied; status CopiedOnly | |
 | Press the hotkey while that Retry runs (History window closed or open) | The bar flashes busy; no dictation starts; the Retry finishes | |
