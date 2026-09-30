@@ -365,9 +365,12 @@ public sealed class HotkeyServiceTests : IDisposable
         Tap('A');
         Tap(0x0D);
         Key(HotkeyChord.VkLShift, false);
+        Key(HotkeyChord.VkLControl, true); // Ctrl+Enter: the send key in some chat apps
+        Tap(0x0D);
+        Key(HotkeyChord.VkLControl, false);
 
         Assert.Equal(
-            ["typed:42:Character:a", "typed:42:Character:7", "typed:42:Character:.", "typed:42:Space:", "typed:42:Erase:", "typed:42:LineBreak:", "typed:42:Character:A", "typed:42:LineBreak:"],
+            ["typed:42:Character:a", "typed:42:Character:7", "typed:42:Character:.", "typed:42:Space:", "typed:42:Erase:", "typed:42:LineBreak:", "typed:42:Character:A", "typed:42:LineBreak:", "typed:42:LineBreak:"],
             await EventsAsync());
     }
 
@@ -388,6 +391,13 @@ public sealed class HotkeyServiceTests : IDisposable
 
         Tap(HotkeyChord.VkLShift);
         Tap(HotkeyChord.VkCapsLock);
+        Tap(0x09);                         // Tab: usually moves the focus to another control
+        Key(HotkeyChord.VkLAlt, true);     // Alt+Enter and Win+Enter: shortcuts (full screen, properties)
+        Tap(0x0D);
+        Key(HotkeyChord.VkLAlt, false);
+        Key(HotkeyChord.VkLWin, true);
+        Tap(0x0D);
+        Key(HotkeyChord.VkLWin, false);
         Tap(0x24);                         // Home
         Tap(HotkeyChord.VkLeft);
         Tap(0x2E);                         // Delete

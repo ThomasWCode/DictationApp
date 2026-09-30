@@ -22,10 +22,10 @@ public enum TypedKey
     /// <summary>Backspace: it removed a character, and one usually still shows before the caret.</summary>
     Erase,
 
-    /// <summary>Space or Tab.</summary>
+    /// <summary>Space.</summary>
     Space,
 
-    /// <summary>Enter, with or without a modifier: a new line, or a message sent and its box emptied.</summary>
+    /// <summary>Enter, Shift+Enter or Ctrl+Enter: a new line, or a message sent and its box emptied.</summary>
     LineBreak,
 }
 

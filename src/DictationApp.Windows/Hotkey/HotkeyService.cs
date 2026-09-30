@@ -40,7 +40,6 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
     public static readonly TimeSpan DoubleTapWindow = TimeSpan.FromMilliseconds(400);
 
     private const int VkBack = 0x08;
-    private const int VkTab = 0x09;
     private const int VkReturn = 0x0D;
 
     private readonly LowLevelKeyboardHook _hook;
@@ -214,8 +213,9 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
                 return true;
             }
 
-            var shortcut = _down.Contains(HotkeyChord.VkControl) || _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkLWin);
-            if (!isChordKey && Typed(vk, shortcut) is { } typed)
+            var ctrl = _down.Contains(HotkeyChord.VkControl);
+            var altOrWin = _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkLWin);
+            if (!isChordKey && Typed(vk, ctrl, altOrWin) is { } typed)
             {
                 // The key reaches the app and changes what is before its caret. Called on the hook thread, so only the
                 // window and Shift are taken here; the character is looked up and the event raised from the dispatch loop.
@@ -282,26 +282,28 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
     }
 
     /// <summary>
-    /// What <paramref name="vk"/> leaves before the caret, or null when the key alone does not tell: Enter (with any
-    /// modifier) a line break; with Ctrl, Alt or Win held, anything else is a shortcut; Space and Tab a space; Backspace
-    /// probably a character; letters, digits and punctuation (Shift allowed) a character. Arrows, Delete, Escape,
-    /// function keys and modifiers change nothing that can be told.
+    /// What <paramref name="vk"/> leaves before the caret, or null when the key alone does not tell. Enter, Shift+Enter
+    /// and Ctrl+Enter break the line (a new line, or a message sent); with Alt or Win held, Enter is a shortcut that
+    /// usually leaves the text alone (full screen, properties), and so is any other key with Ctrl, Alt or Win. Space
+    /// leaves a space, Backspace probably a character, and letters, digits and punctuation (Shift allowed) a character.
+    /// Tab usually moves the focus rather than typing; the arrows, Delete, Escape, function keys and modifiers change
+    /// nothing that can be told.
     /// </summary>
-    private static TypedKey? Typed(int vk, bool shortcut)
+    private static TypedKey? Typed(int vk, bool ctrl, bool altOrWin)
     {
         if (vk == VkReturn)
         {
-            return TypedKey.LineBreak;
+            return altOrWin ? null : TypedKey.LineBreak;
         }
 
-        if (shortcut)
+        if (ctrl || altOrWin)
         {
             return null;
         }
 
         return vk switch
         {
-            HotkeyChord.VkSpace or VkTab => TypedKey.Space,
+            HotkeyChord.VkSpace => TypedKey.Space,
             VkBack => TypedKey.Erase,
             (>= 0x30 and <= 0x39) or (>= 0x41 and <= 0x5A) or (>= 0x60 and <= 0x6F) or (>= 0xBA and <= 0xC0) or (>= 0xDB and <= 0xDF) or 0xE2 => TypedKey.Character,
             _ => null,

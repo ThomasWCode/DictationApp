@@ -44,9 +44,10 @@ public interface IHotkeyService
     /// <summary>
     /// A key that reaches the app went down in the window given (the foreground window), and what it leaves before the
     /// caret: a character (with the character itself when the keyboard layout says which), Backspace, a space or a line
-    /// break (Enter: a new line, or a message sent). Keys whose effect the key alone does not tell (the arrows, Delete,
-    /// shortcuts with Ctrl, Alt or Win, function keys) raise nothing, nor do modifiers, the chord, keys swallowed while the
-    /// chord is held and injected keys.
+    /// break (Enter, Shift+Enter or Ctrl+Enter: a new line, or a message sent). Keys whose effect the key alone does not
+    /// tell (Tab, which usually moves the focus, the arrows, Delete, shortcuts with Ctrl, Alt or Win, Enter with Alt or Win
+    /// among them, function keys) raise nothing, nor do modifiers, the chord, keys swallowed while the chord is held and
+    /// injected keys.
     /// </summary>
     event Action<nint, TypedKey, char?>? KeyTyped;
 
