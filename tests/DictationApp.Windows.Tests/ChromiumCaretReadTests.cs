@@ -28,7 +28,6 @@ public sealed class ChromiumCaretReadTests : IDisposable
         ("tiptap-fresh-line", "tiptap", false),
         ("fresh-line-unmarked", "tiptap", false),
         ("placeholder-paragraph", "tiptap", false),
-        ("widget-placeholder", "tiptap", false),
         ("hard-break-empty-line", "tiptap", false),
         ("text-after-hard-break", "tiptap", true),
         ("caret-starts-line-two", "tiptap", false),
@@ -45,6 +44,9 @@ public sealed class ChromiumCaretReadTests : IDisposable
         ("slate-placeholder", "slate", false),
         ("textarea-with-placeholder-class", "ta3", true),
         ("editor-root-with-placeholder-class", "ce", true),
+        ("text-before-hard-break", "tiptap", true),
+        ("text-before-hard-break-in-text-node", "tiptap", true),
+        ("mention-at-paragraph-end", "tiptap", true),
     ];
 
     private const string Page = """
@@ -84,7 +86,6 @@ public sealed class ChromiumCaretReadTests : IDisposable
             "tiptap-fresh-line": () => tiptap('<p>First line.</p><p data-placeholder="Reply to Claude" class="is-empty"><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.lastChild, 0)),
             "fresh-line-unmarked": () => tiptap('<p>First line.</p><p><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.lastChild, 0)),
             "placeholder-paragraph": () => tiptap('<p data-placeholder="Ask anything" class="placeholder"><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.firstChild, 0)),
-            "widget-placeholder": () => tiptap('<p><span contenteditable="false">Reply to Claude</span><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.firstChild, 1)),
             "hard-break-empty-line": () => tiptap('<p>First line.<br><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.firstChild, 2)),
             "text-after-hard-break": () => tiptap("<p>First line.<br>Second</p>", () => caretAt(ed.firstChild.lastChild, 6)),
             "caret-starts-line-two": () => tiptap("<p>Line one.</p><p>Line two</p>", () => caretAt(ed.lastChild.firstChild, 0)),
@@ -104,6 +105,9 @@ public sealed class ChromiumCaretReadTests : IDisposable
             },
             "textarea-with-placeholder-class": () => { $("ta3").value = "Hello world"; $("ta3").focus(); $("ta3").setSelectionRange(11, 11); },
             "editor-root-with-placeholder-class": () => { const c = $("ce"); c.focus(); caretAt(c.firstChild, c.firstChild.length); },
+            "text-before-hard-break": () => tiptap('<p>First line.<br><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.firstChild, 1)),
+            "text-before-hard-break-in-text-node": () => tiptap('<p>First line.<br><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.firstChild.firstChild, 11)),
+            "mention-at-paragraph-end": () => tiptap('<p>Hi <span class="mention" contenteditable="false">@Bob</span><br class="ProseMirror-trailingBreak"></p>', () => caretAt(ed.firstChild, 2)),
           };
           const order = ORDER;
           let i = 0;

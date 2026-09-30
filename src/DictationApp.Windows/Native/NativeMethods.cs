@@ -190,6 +190,16 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern uint MapVirtualKeyW(uint uCode, uint uMapType);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern uint MapVirtualKeyExW(uint uCode, uint uMapType, nint dwhkl);
+
+    [DllImport("user32.dll")]
+    public static extern nint GetKeyboardLayout(uint idThread);
+
+    /// <summary>With <c>wFlags</c> 4 the keyboard state, a pending dead key included, is left alone (Windows 10 1607 and later).</summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int ToUnicodeEx(uint wVirtKey, uint wScanCode, byte[] lpKeyState, [Out] char[] pwszBuff, int cchBuff, uint wFlags, nint dwhkl);
+
     [DllImport("user32.dll")]
     public static extern nint GetForegroundWindow();
 

@@ -120,6 +120,25 @@ public class InsertionTextFormatterTests
     }
 
     [Fact]
+    public void A_typed_character_is_remembered_as_itself()
+    {
+        var f = new InsertionTextFormatter();
+        f.Format("First", 1);
+
+        f.Typed(1, TypedKey.Character, '.');            // a full stop typed by hand: a space and a capital
+        Assert.Equal(" Second", f.Format("second", 1));
+
+        f.Typed(1, TypedKey.Character, '!');
+        Assert.Equal(" Third", f.Format("third", 1));
+
+        f.Typed(1, TypedKey.Character, '(');            // an opening bracket: no space after it
+        Assert.Equal("aside", f.Format("aside", 1));
+
+        f.Typed(1, TypedKey.Character);                 // the layout did not say which: a character stands in
+        Assert.Equal(" more", f.Format("more", 1));
+    }
+
+    [Fact]
     public void A_key_typed_after_the_memory_expired_does_not_revive_it()
     {
         var clock = new FakeTimeProvider();

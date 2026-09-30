@@ -14,12 +14,6 @@ internal static class EmptyFieldMarkers
     /// <summary>The <c>FrameworkId</c> UI Automation reports for Chromium content.</summary>
     public const string ChromiumFramework = "Chrome";
 
-    /// <summary>
-    /// Class of the marker element ProseMirror puts in an empty block (or one that ends in a line break). The fallback for
-    /// editors whose placeholder carries no class of its own.
-    /// </summary>
-    public const string TrailingBreakClass = "ProseMirror-trailingBreak";
-
     /// <summary>Set on the editor or on its first block, and removed again as soon as there is any content.</summary>
     private static readonly HashSet<string> EmptyEditor = new(StringComparer.OrdinalIgnoreCase) { "is-editor-empty", "ql-blank" };
 

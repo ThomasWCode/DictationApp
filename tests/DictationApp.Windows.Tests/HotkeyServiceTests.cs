@@ -344,7 +344,15 @@ public sealed class HotkeyServiceTests : IDisposable
     {
         _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
         _service.ForegroundWindow = () => 42;
-        _service.KeyTyped += (w, k) => Add($"typed:{w}:{k}");
+        _service.CharacterOf = (vk, shift, window) => window != 42 ? null : (vk, shift) switch
+        {
+            ('A', false) => 'a',
+            ('A', true) => 'A',
+            ('7', false) => '7',
+            (0xBE, false) => '.',
+            _ => null,
+        };
+        _service.KeyTyped += (w, k, c) => Add($"typed:{w}:{k}:{c}");
 
         Assert.False(Key('A', true));    // typed into the app, never swallowed
         Key('A', false);
@@ -359,8 +367,16 @@ public sealed class HotkeyServiceTests : IDisposable
         Key(HotkeyChord.VkLShift, false);
 
         Assert.Equal(
-            ["typed:42:Character", "typed:42:Character", "typed:42:Character", "typed:42:Space", "typed:42:Erase", "typed:42:LineBreak", "typed:42:Character", "typed:42:LineBreak"],
+            ["typed:42:Character:a", "typed:42:Character:7", "typed:42:Character:.", "typed:42:Space:", "typed:42:Erase:", "typed:42:LineBreak:", "typed:42:Character:A", "typed:42:LineBreak:"],
             await EventsAsync());
+    }
+
+    [Fact]
+    public void The_keyboard_layout_says_which_character_a_key_types()
+    {
+        // Whatever this machine's layout, a letter key types a letter, and Shift makes it a capital.
+        Assert.True(HotkeyService.LayoutCharacter('A', shift: false, window: 0) is { } lower && char.IsLower(lower));
+        Assert.True(HotkeyService.LayoutCharacter('A', shift: true, window: 0) is { } upper && char.IsUpper(upper));
     }
 
     [Fact]
@@ -368,7 +384,7 @@ public sealed class HotkeyServiceTests : IDisposable
     {
         _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
         _service.ForegroundWindow = () => 42;
-        _service.KeyTyped += (w, k) => Add($"typed:{w}:{k}");
+        _service.KeyTyped += (w, k, c) => Add($"typed:{w}:{k}:{c}");
 
         Tap(HotkeyChord.VkLShift);
         Tap(HotkeyChord.VkCapsLock);
