@@ -71,6 +71,34 @@ public class InsertionTextFormatterTests
     }
 
     [Fact]
+    public void The_basis_of_the_decision_is_reported_for_the_log()
+    {
+        var f = new InsertionTextFormatter();
+
+        var first = f.FormatDetailed("first", 1); // nothing read, nothing remembered
+        Assert.Equal(SpacingBasis.Unknown, first.Basis);
+        Assert.Null(first.Tail);
+        Assert.Equal("first", first.Text);
+
+        var second = f.FormatDetailed("second", 1); // the control cannot be read: our last insertion stands in
+        Assert.Equal(SpacingBasis.Memory, second.Basis);
+        Assert.Equal("t", second.Tail);
+        Assert.Equal(" second", second.Text);
+
+        var empty = f.FormatDetailed("third", 1, textBeforeCaret: ""); // the control says the field is empty
+        Assert.Equal(SpacingBasis.Caret, empty.Basis);
+        Assert.Null(empty.Tail);
+        Assert.Equal("third", empty.Text);
+
+        var after = f.FormatDetailed("fourth", 1, textBeforeCaret: "end.");
+        Assert.Equal(SpacingBasis.Caret, after.Basis);
+        Assert.Equal(".", after.Tail);
+        Assert.Equal(" Fourth", after.Text);
+
+        Assert.Equal(SpacingBasis.Unknown, f.FormatDetailed("", 1).Basis); // nothing to insert
+    }
+
+    [Fact]
     public void Reset_clears_memory()
     {
         var f = new InsertionTextFormatter();

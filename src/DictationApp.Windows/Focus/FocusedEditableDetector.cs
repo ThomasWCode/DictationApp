@@ -1,3 +1,4 @@
+using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.Core.Definitions;
 using FlaUI.UIA3;
@@ -80,10 +81,28 @@ public sealed class FocusedEditableDetector : IDisposable
     /// selection start). The caller checks that the target window has focus: the control itself may belong to another
     /// process (WebView2 content runs in msedgewebview2). "" at the start of a field,
     /// or when a control without a caret position (Value pattern only, a Chromium contenteditable reporting no caret)
-    /// is empty. Null otherwise: password fields, text whose caret position is unknown, controls with neither pattern,
-    /// and when UI Automation does not answer in time.
+    /// is empty, or when a Chromium editor shows the placeholder of an empty box (see <see cref="EmptyFieldMarkers"/>:
+    /// that placeholder is not text before the caret). Null otherwise: password fields, text whose caret position is
+    /// unknown, controls with neither pattern, and when UI Automation does not answer in time.
     /// </summary>
-    public string? ReadTextBeforeCaret() => RunWithBudget(() => ProbeTextBeforeCaret() is { } text ? new CaretText(text) : (CaretText?)null, CaretBudget)?.Text;
+    public string? ReadTextBeforeCaret()
+    {
+        var task = Task.Run(() => ProbeTextBeforeCaret());
+        try
+        {
+            if (task.Wait(CaretBudget))
+            {
+                return task.Result;
+            }
+
+            _logger.LogDebug("Reading the text before the caret took longer than {Budget} ms", CaretBudget.TotalMilliseconds);
+            return null;
+        }
+        catch (AggregateException)
+        {
+            return null;
+        }
+    }
 
     public void Dispose()
     {
@@ -96,41 +115,87 @@ public sealed class FocusedEditableDetector : IDisposable
         try
         {
             var focused = Automation().FocusedElement();
-            if (focused is null || focused.Properties.IsPassword.ValueOrDefault)
-            {
-                return null;
-            }
-
-            if (focused.Patterns.Text.IsSupported)
-            {
-                var pattern = focused.Patterns.Text.Pattern;
-                var selection = pattern.GetSelection();
-                if (selection.Length > 0)
-                {
-                    var before = selection[0].Clone();
-                    before.MoveEndpointByUnit(TextPatternRangeEndpoint.Start, TextUnit.Character, -CaretContextLength);
-                    before.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection[0], TextPatternRangeEndpoint.Start);
-                    return before.GetText(CaretContextLength) ?? string.Empty;
-                }
-
-                // No caret reported (an empty contenteditable in Chromium): an empty document is the start of the field.
-                if (IsBlank(pattern.DocumentRange.GetText(CaretContextLength)))
-                {
-                    return string.Empty;
-                }
-            }
-
-            // The Value pattern gives no caret position: only an empty field says what comes before the insertion.
-            if (focused.Patterns.Value.IsSupported && IsBlank(focused.Patterns.Value.Pattern.Value.ValueOrDefault))
-            {
-                return string.Empty;
-            }
-
-            return null;
+            return focused is null ? null : TextBeforeCaretOf(focused);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Reading the text before the caret failed");
+            return null;
+        }
+    }
+
+    /// <summary>The read itself, on any element: the focused one in use, a chosen one in tests and probes.</summary>
+    internal static string? TextBeforeCaretOf(AutomationElement focused)
+    {
+        if (focused.Properties.IsPassword.ValueOrDefault)
+        {
+            return null;
+        }
+
+        if (focused.Patterns.Text.IsSupported)
+        {
+            var pattern = focused.Patterns.Text.Pattern;
+            var selection = pattern.GetSelection();
+            if (selection.Length > 0)
+            {
+                // A Chromium editor's placeholder reads as text before the caret, but the box it sits in is empty.
+                if (EmptyBlockText(focused, selection[0]) is { } empty)
+                {
+                    return empty;
+                }
+
+                var before = selection[0].Clone();
+                before.MoveEndpointByUnit(TextPatternRangeEndpoint.Start, TextUnit.Character, -CaretContextLength);
+                before.MoveEndpointByRange(TextPatternRangeEndpoint.End, selection[0], TextPatternRangeEndpoint.Start);
+                return before.GetText(CaretContextLength) ?? string.Empty;
+            }
+
+            // No caret reported (an empty contenteditable in Chromium): an empty document is the start of the field.
+            if (IsBlank(pattern.DocumentRange.GetText(CaretContextLength)))
+            {
+                return string.Empty;
+            }
+        }
+
+        // The Value pattern gives no caret position: only an empty field says what comes before the insertion.
+        if (focused.Patterns.Value.IsSupported && IsBlank(focused.Patterns.Value.Pattern.Value.ValueOrDefault))
+        {
+            return string.Empty;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// In a Chromium editor: "" or a line break when the caret is in a block the editor marks as empty, else null (read the
+    /// text as usual). Chromium exposes each element's HTML classes as its ClassName; see <see cref="EmptyFieldMarkers"/>.
+    /// Only Chromium is asked, and a failed check leaves the ordinary read alone rather than losing it.
+    /// </summary>
+    private static string? EmptyBlockText(AutomationElement focused, ITextRange caret)
+    {
+        try
+        {
+            if (focused.Properties.FrameworkId.ValueOrDefault != EmptyFieldMarkers.ChromiumFramework)
+            {
+                return null;
+            }
+
+            var block = caret.GetEnclosingElement();
+            var marked = EmptyFieldMarkers.TextBeforeCaret(focused.Properties.ClassName.ValueOrDefault, block?.Properties.ClassName.ValueOrDefault);
+            if (marked is not null)
+            {
+                return marked;
+            }
+
+            // ProseMirror editors whose placeholder carries no class still put a marker element in every empty block.
+            return block is not null
+                && block.Properties.ControlType.ValueOrDefault == ControlType.Group
+                && block.FindFirstChild(f => f.ByClassName(EmptyFieldMarkers.TrailingBreakClass)) is not null
+                    ? "\n"
+                    : null;
+        }
+        catch (Exception)
+        {
             return null;
         }
     }
@@ -208,8 +273,6 @@ public sealed class FocusedEditableDetector : IDisposable
 
     /// <summary>Empty apart from whitespace and invisible stand-ins such as a rich editor's empty paragraph.</summary>
     private static bool IsBlank(string? text) => (text ?? string.Empty).Trim().Trim('\uFFFC', '\u200B', '\uFEFF').Length == 0;
-
-    private readonly record struct CaretText(string Text);
 
     private static T? RunWithBudget<T>(Func<T?> probe, TimeSpan budget) where T : struct
     {

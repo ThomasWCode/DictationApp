@@ -849,7 +849,7 @@ public sealed class DictationOrchestrator : BackgroundService
                 pasteMode = PasteModeFor(target, settings);
             }
 
-            var text = _formatter.Format(result.Text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+            var text = FormatForInsertion(result.Text, target);
             record.InsertedText = text;
 
             // Insertion is the commit point: once it starts it runs to the end (paste, then clipboard restore), even if
@@ -1094,7 +1094,7 @@ public sealed class DictationOrchestrator : BackgroundService
         var target = SafeCapture();
 
         // The stored text carries the spacing of where it first went; the new field decides afresh.
-        var formatted = _formatter.Format(text.TrimStart(), target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+        var formatted = FormatForInsertion(text.TrimStart(), target);
         var insertion = await DeliverAsync(formatted, target, PasteModeFor(target, _settings.Current)).ConfigureAwait(false);
         _logger.LogInformation("Re-insert into {Process}: {Outcome}", target.ProcessName, insertion.Outcome);
         return insertion;
@@ -1305,6 +1305,23 @@ public sealed class DictationOrchestrator : BackgroundService
             return null;
         }
     }
+
+    /// <summary>
+    /// Joins <paramref name="text"/> to what is before the caret in <paramref name="target"/> (see
+    /// <see cref="InsertionTextFormatter"/>) and logs how that was decided: a stray space in an empty box cannot be traced
+    /// without knowing whether the control or the memory of the last insertion said something was there. The character
+    /// is logged by kind only, never as text.
+    /// </summary>
+    private string FormatForInsertion(string text, ForegroundContext target)
+    {
+        var formatted = _formatter.FormatDetailed(text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+        _logger.LogDebug("Spacing in {Process}: basis={Basis} tail={Tail} space={Space}", target.ProcessName, formatted.Basis, DescribeTail(formatted.Tail), formatted.Text.StartsWith(' '));
+        return formatted.Text;
+    }
+
+    private static string DescribeTail(string? tail) => string.IsNullOrEmpty(tail)
+        ? "none"
+        : char.IsLetter(tail[0]) ? "letter" : char.IsDigit(tail[0]) ? "digit" : $"U+{(int)tail[0]:X4}";
 
     /// <summary>The window in front now, or <see cref="ForegroundContext.Unknown"/> after <see cref="LookupTimeout"/>.</summary>
     private async Task<ForegroundContext> CaptureWithinAsync()

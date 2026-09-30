@@ -17,6 +17,9 @@ runs the whole pipeline with a WAV in place of the microphone and pastes into wh
 | Word, Outlook desktop (new + classic) | Rich paste OK; default tone chip (Formal only if you added an app rule) | |
 | Chrome/Edge: Gmail compose | Address bar read in log; a `mail.google.com` rule, if added, applies | |
 | Chrome/Edge: plain textarea | Inserted | |
+| Claude desktop app and claude.ai (TipTap): dictate into the empty prompt box, send, dictate again | No leading space either time (the log says `Spacing in ...: basis=Caret tail=none space=False`); a second dictation into the same box is joined with one space | |
+| Claude prompt box: Shift+Enter for a new line, then dictate | No space at the start of the new line | |
+| ChatGPT and a Quill editor (Gemini, Slack in Chrome), empty box | No leading space | |
 | Chrome/Edge: address bar (omnibox) | Inserted into omnibox | |
 | Teams, Slack, WhatsApp desktop | Electron; default tone chip (Casual only if you added an app rule) | |
 | VS Code | Level None (no LLM call, see log) | |
