@@ -70,6 +70,12 @@ public sealed class DictationRecord
     public bool HasAudio => !string.IsNullOrEmpty(AudioPath);
 
     public bool CanUndoAiEdit => !AiEditUndone && CleanedText.Length > 0 && !string.Equals(CleanedText, RawTranscript, StringComparison.Ordinal);
+
+    /// <summary>
+    /// What History's Copy puts on the clipboard: the inserted text (or the raw transcript) without the joining space it
+    /// was inserted with after existing text, since it may be pasted into an empty box (Re-insert drops it too).
+    /// </summary>
+    public string CopyText => (InsertedText.Length > 0 ? InsertedText : RawTranscript).TrimStart();
 }
 
 public sealed record HistoryStats(int Count, decimal TotalCost, long TotalAudioBytes, int WithAudio);

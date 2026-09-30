@@ -120,9 +120,7 @@ public sealed partial class HistoryViewModel : ObservableObject
             return;
         }
 
-        // Without the joining space the text got where it was first inserted, as Re-insert does: it may be pasted into an
-        // empty box.
-        await _clipboard.SetTextAsync((Selected.InsertedText.Length > 0 ? Selected.InsertedText : Selected.RawTranscript).TrimStart());
+        await _clipboard.SetTextAsync(Selected.CopyText);
         Status = "Copied to clipboard.";
     }
 
