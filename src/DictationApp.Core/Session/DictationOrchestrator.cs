@@ -342,6 +342,7 @@ public sealed class DictationOrchestrator : BackgroundService
         _hotkeys.ChordUp += OnChordUp;
         _hotkeys.EscapePressed += OnEscape;
         _hotkeys.ArrowPressed += OnArrow;
+        _hotkeys.KeyTyped += OnKeyTyped;
         _hub.ToneOverrideRequested += OnToneOverride;
         _hub.LevelOverrideRequested += OnLevelOverride;
         _hub.Publish(DictationStatus.Idle with { Tone = _settings.Current.DefaultTone, CleanupLevel = _settings.Current.DefaultCleanupLevel, HotkeyEnabled = _hotkeys.Enabled });
@@ -379,6 +380,7 @@ public sealed class DictationOrchestrator : BackgroundService
             _hotkeys.ChordUp -= OnChordUp;
             _hotkeys.EscapePressed -= OnEscape;
             _hotkeys.ArrowPressed -= OnArrow;
+            _hotkeys.KeyTyped -= OnKeyTyped;
             _hub.ToneOverrideRequested -= OnToneOverride;
             _hub.LevelOverrideRequested -= OnLevelOverride;
 
@@ -849,13 +851,18 @@ public sealed class DictationOrchestrator : BackgroundService
                 pasteMode = PasteModeFor(target, settings);
             }
 
-            var text = _formatter.Format(result.Text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+            var text = FormatForInsertion(result.Text, target);
             record.InsertedText = text;
 
             // Insertion is the commit point: once it starts it runs to the end (paste, then clipboard restore), even if
             // the app is closing meanwhile, so it takes no cancellation token.
             var insertion = await DeliverAsync(text, target, pasteMode).ConfigureAwait(false);
             session.Mark("insert");
+            if (insertion.Outcome != InsertionOutcome.Inserted)
+            {
+                record.InsertedText = text.TrimStart(); // what went on the clipboard, without the joining space
+            }
+
             switch (insertion.Outcome)
             {
                 case InsertionOutcome.Inserted:
@@ -1094,7 +1101,7 @@ public sealed class DictationOrchestrator : BackgroundService
         var target = SafeCapture();
 
         // The stored text carries the spacing of where it first went; the new field decides afresh.
-        var formatted = _formatter.Format(text.TrimStart(), target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+        var formatted = FormatForInsertion(text.TrimStart(), target);
         var insertion = await DeliverAsync(formatted, target, PasteModeFor(target, _settings.Current)).ConfigureAwait(false);
         _logger.LogInformation("Re-insert into {Process}: {Outcome}", target.ProcessName, insertion.Outcome);
         return insertion;
@@ -1109,16 +1116,23 @@ public sealed class DictationOrchestrator : BackgroundService
     {
         InsertionResult insertion;
         var copiedAfterFailure = false;
+        var pasted = target.IsEditable && !target.IsElevated;
         await _clipboardGate.WaitAsync().ConfigureAwait(false);
         try
         {
             // Copied text will be pasted by hand somewhere else, so it carries no joining space.
-            insertion = target.IsEditable && !target.IsElevated
+            insertion = pasted
                 ? await _inserter.InsertAsync(text, target, pasteMode, CancellationToken.None).ConfigureAwait(false)
                 : await CopyAsync(text.TrimStart(), target.IsElevated ? "Target is elevated, text copied" : "No text box has focus, text copied").ConfigureAwait(false);
-            if (insertion.Outcome == InsertionOutcome.Failed && target.IsEditable && !target.IsElevated)
+            if (insertion.Outcome == InsertionOutcome.Failed && pasted)
             {
                 copiedAfterFailure = (await CopyAsync(text.TrimStart(), null).ConfigureAwait(false)).Outcome == InsertionOutcome.CopiedOnly;
+            }
+            else if (pasted && (insertion.Outcome == InsertionOutcome.CopiedOnly || insertion.LeftOnClipboard) && text.Length > 0 && char.IsWhiteSpace(text[0]))
+            {
+                // The inserter left its text on the clipboard for the user to paste by hand (the paste could not be sent or
+                // confirmed): the same text without the joining space, which would start an empty box with a space.
+                await ReplaceClipboardAsync(text.TrimStart()).ConfigureAwait(false);
             }
         }
         finally
@@ -1142,6 +1156,19 @@ public sealed class DictationOrchestrator : BackgroundService
         }
 
         return insertion;
+    }
+
+    private async Task ReplaceClipboardAsync(string text)
+    {
+        try
+        {
+            await _clipboard.SetTextAsync(text, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The text is on the clipboard already, only with its joining space.
+            _logger.LogWarning(ex, "Could not take the joining space off the text left on the clipboard");
+        }
     }
 
     private async Task<InsertionResult> CopyAsync(string text, string? reason)
@@ -1306,6 +1333,23 @@ public sealed class DictationOrchestrator : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Joins <paramref name="text"/> to what is before the caret in <paramref name="target"/> (see
+    /// <see cref="InsertionTextFormatter"/>) and logs how that was decided: a stray space in an empty box cannot be traced
+    /// without knowing whether the control or the memory of the last insertion said something was there. The character
+    /// is logged by kind only, never as text.
+    /// </summary>
+    private string FormatForInsertion(string text, ForegroundContext target)
+    {
+        var formatted = _formatter.FormatDetailed(text, target.WindowHandle, target.IsEditable ? SafeReadTextBeforeCaret(target) : null);
+        _logger.LogDebug("Spacing in {Process}: basis={Basis} tail={Tail} space={Space}", target.ProcessName, formatted.Basis, DescribeTail(formatted.Tail), formatted.Text.StartsWith(' '));
+        return formatted.Text;
+    }
+
+    private static string DescribeTail(string? tail) => string.IsNullOrEmpty(tail)
+        ? "none"
+        : char.IsLetter(tail[0]) ? "letter" : char.IsDigit(tail[0]) ? "digit" : $"U+{(int)tail[0]:X4}";
+
     /// <summary>The window in front now, or <see cref="ForegroundContext.Unknown"/> after <see cref="LookupTimeout"/>.</summary>
     private async Task<ForegroundContext> CaptureWithinAsync()
     {
@@ -1464,6 +1508,13 @@ public sealed class DictationOrchestrator : BackgroundService
     private void OnEscape() => _events.Writer.TryWrite(new ControlEvent(ControlKind.Escape));
 
     private void OnArrow(ArrowDirection direction) => _events.Writer.TryWrite(new ControlEvent(ControlKind.Arrow, direction));
+
+    /// <summary>
+    /// The user pressed a key in <paramref name="window"/>: the memory of what is before the caret there follows it.
+    /// Without this, a chat box whose caret cannot be read got a leading space after a message was sent with Enter,
+    /// because the memory still ended with the sent message's full stop.
+    /// </summary>
+    private void OnKeyTyped(nint window, TypedKey key, char? character) => _formatter.Typed(window, key, character);
 
     private void OnToneOverride(Tone tone) => _events.Writer.TryWrite(new ControlEvent(ControlKind.ToneOverride, Tone: tone));
 

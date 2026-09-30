@@ -71,6 +71,86 @@ public class InsertionTextFormatterTests
     }
 
     [Fact]
+    public void The_basis_of_the_decision_is_reported_for_the_log()
+    {
+        var f = new InsertionTextFormatter();
+
+        var first = f.FormatDetailed("first", 1); // nothing read, nothing remembered
+        Assert.Equal(SpacingBasis.Unknown, first.Basis);
+        Assert.Null(first.Tail);
+        Assert.Equal("first", first.Text);
+
+        var second = f.FormatDetailed("second", 1); // the control cannot be read: our last insertion stands in
+        Assert.Equal(SpacingBasis.Memory, second.Basis);
+        Assert.Equal("t", second.Tail);
+        Assert.Equal(" second", second.Text);
+
+        var empty = f.FormatDetailed("third", 1, textBeforeCaret: ""); // the control says the field is empty
+        Assert.Equal(SpacingBasis.Caret, empty.Basis);
+        Assert.Null(empty.Tail);
+        Assert.Equal("third", empty.Text);
+
+        var after = f.FormatDetailed("fourth", 1, textBeforeCaret: "end.");
+        Assert.Equal(SpacingBasis.Caret, after.Basis);
+        Assert.Equal(".", after.Tail);
+        Assert.Equal(" Fourth", after.Text);
+
+        Assert.Equal(SpacingBasis.Unknown, f.FormatDetailed("", 1).Basis); // nothing to insert
+    }
+
+    [Fact]
+    public void Keys_typed_after_an_insertion_decide_what_the_memory_says()
+    {
+        var f = new InsertionTextFormatter();
+        f.Format("hello", 1);                          // the control cannot be read: remembered
+        f.Typed(1, TypedKey.Character);                // the user typed "x" after it
+        Assert.Equal(" world", f.Format("world", 1));  // "hellox world", not "helloxworld"
+
+        f.Typed(1, TypedKey.LineBreak);                // Enter: a new line, or the message was sent
+        Assert.Equal("Next", f.Format("next", 1));
+
+        f.Typed(1, TypedKey.Space);
+        Assert.Equal("more", f.Format("more", 1));
+
+        f.Typed(1, TypedKey.Erase);                    // Backspace: a character most likely still shows before the caret
+        Assert.Equal(" again", f.Format("again", 1));
+
+        f.Typed(2, TypedKey.Character);                // nothing was inserted into window 2: nothing to follow there
+        Assert.Equal("fresh", f.Format("fresh", 2));
+    }
+
+    [Fact]
+    public void A_typed_character_is_remembered_as_itself()
+    {
+        var f = new InsertionTextFormatter();
+        f.Format("First", 1);
+
+        f.Typed(1, TypedKey.Character, '.');            // a full stop typed by hand: a space and a capital
+        Assert.Equal(" Second", f.Format("second", 1));
+
+        f.Typed(1, TypedKey.Character, '!');
+        Assert.Equal(" Third", f.Format("third", 1));
+
+        f.Typed(1, TypedKey.Character, '(');            // an opening bracket: no space after it
+        Assert.Equal("aside", f.Format("aside", 1));
+
+        f.Typed(1, TypedKey.Character);                 // the layout did not say which: a character stands in
+        Assert.Equal(" more", f.Format("more", 1));
+    }
+
+    [Fact]
+    public void A_key_typed_after_the_memory_expired_does_not_revive_it()
+    {
+        var clock = new FakeTimeProvider();
+        var f = new InsertionTextFormatter(clock) { Memory = TimeSpan.FromMinutes(10) };
+        f.Format("hello", 1);
+        clock.Advance(TimeSpan.FromMinutes(11));
+        f.Typed(1, TypedKey.Character);
+
+        Assert.Equal("world", f.Format("world", 1));
+    }
+
+    [Fact]
     public void Reset_clears_memory()
     {
         var f = new InsertionTextFormatter();

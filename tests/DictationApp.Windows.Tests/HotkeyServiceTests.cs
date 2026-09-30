@@ -340,6 +340,92 @@ public sealed class HotkeyServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task Keys_that_reach_the_app_report_what_they_leave_before_the_caret()
+    {
+        _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
+        _service.ForegroundWindow = () => 42;
+        _service.CharacterOf = (vk, shift, window) => window != 42 ? null : (vk, shift) switch
+        {
+            ('A', false) => 'a',
+            ('A', true) => 'A',
+            ('7', false) => '7',
+            (0xBE, false) => '.',
+            _ => null,
+        };
+        _service.KeyTyped += (w, k, c) => Add($"typed:{w}:{k}:{c}");
+
+        Assert.False(Key('A', true));    // typed into the app, never swallowed
+        Key('A', false);
+        Tap('7');
+        Tap(0xBE);                       // the full stop key
+        Tap(HotkeyChord.VkSpace);
+        Tap(0x08);                       // Backspace
+        Tap(0x0D);                       // Enter: a chat app sends the message
+        Key(HotkeyChord.VkLShift, true); // Shift+A and Shift+Enter: still a character and a line break
+        Tap('A');
+        Tap(0x0D);
+        Key(HotkeyChord.VkLShift, false);
+        Key(HotkeyChord.VkLControl, true); // Ctrl+Enter: the send key in some chat apps
+        Tap(0x0D);
+        Key(HotkeyChord.VkLControl, false);
+
+        Assert.Equal(
+            ["typed:42:Character:a", "typed:42:Character:7", "typed:42:Character:.", "typed:42:Space:", "typed:42:Erase:", "typed:42:LineBreak:", "typed:42:Character:A", "typed:42:LineBreak:", "typed:42:LineBreak:"],
+            await EventsAsync());
+    }
+
+    [Fact]
+    public void The_keyboard_layout_says_which_character_a_key_types()
+    {
+        // Whatever this machine's layout, a letter key types a letter, and Shift makes it a capital.
+        Assert.True(HotkeyService.LayoutCharacter('A', shift: false, window: 0) is { } lower && char.IsLower(lower));
+        Assert.True(HotkeyService.LayoutCharacter('A', shift: true, window: 0) is { } upper && char.IsUpper(upper));
+    }
+
+    [Fact]
+    public async Task Keys_whose_effect_is_unknown_or_that_never_reach_the_app_report_nothing()
+    {
+        _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));
+        _service.ForegroundWindow = () => 42;
+        _service.KeyTyped += (w, k, c) => Add($"typed:{w}:{k}:{c}");
+
+        Tap(HotkeyChord.VkLShift);
+        Tap(HotkeyChord.VkCapsLock);
+        Tap(0x09);                         // Tab: usually moves the focus to another control
+        Key(HotkeyChord.VkLAlt, true);     // Alt+Enter and Win+Enter: shortcuts (full screen, properties)
+        Tap(0x0D);
+        Key(HotkeyChord.VkLAlt, false);
+        Key(HotkeyChord.VkLWin, true);
+        Tap(0x0D);
+        Key(HotkeyChord.VkLWin, false);
+        Tap(0x24);                         // Home
+        Tap(HotkeyChord.VkLeft);
+        Tap(0x2E);                         // Delete
+        Tap(HotkeyChord.VkEscape);
+        Tap(0x74);                         // F5
+        Key(HotkeyChord.VkLControl, true); // Ctrl+C: a shortcut, whatever it does
+        Tap('C');
+        Key(HotkeyChord.VkLControl, false);
+        Key('B', true, injected: true);    // our own paste keystrokes
+        Key('B', false, injected: true);
+        Key(HotkeyChord.VkLControl, true);
+        Key(HotkeyChord.VkLAlt, true);
+        Assert.True(Key('D', true));       // blocked while the chord is held: it never reaches the app
+        Key('D', false);
+        Advance(1000);
+        Key(HotkeyChord.VkLAlt, false);
+        Key(HotkeyChord.VkLControl, false);
+
+        Assert.Equal(["down", "up"], await EventsAsync());
+    }
+
+    private void Tap(int vk)
+    {
+        Key(vk, true);
+        Key(vk, false);
+    }
+
+    [Fact]
     public async Task Arrows_and_escape_are_swallowed_while_holding_and_other_keys_blocked()
     {
         _service.Configure(HotkeyChord.Parse("Ctrl+Alt"));

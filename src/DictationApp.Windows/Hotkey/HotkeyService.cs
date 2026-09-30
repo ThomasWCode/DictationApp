@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using DictationApp.Core.Abstractions;
+using DictationApp.Core.Insertion;
 using DictationApp.Core.Session;
 using DictationApp.Core.Settings;
 using DictationApp.Windows.Native;
@@ -37,6 +38,9 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 {
     public static readonly TimeSpan TapThreshold = TimeSpan.FromMilliseconds(300);
     public static readonly TimeSpan DoubleTapWindow = TimeSpan.FromMilliseconds(400);
+
+    private const int VkBack = 0x08;
+    private const int VkReturn = 0x0D;
 
     private readonly LowLevelKeyboardHook _hook;
     private readonly DictationStatusHub _hub;
@@ -80,6 +84,8 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     public event Action<ArrowDirection>? ArrowPressed;
 
+    public event Action<nint, TypedKey, char?>? KeyTyped;
+
     /// <summary>Raised instead of ChordDown/ChordUp while <see cref="ObserveOnly"/> is set: true on press, false on release.</summary>
     public event Action<bool>? ChordObserved;
 
@@ -118,6 +124,12 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     /// <summary>Runs an action once after a delay (the double-tap window); replaceable so tests control time.</summary>
     internal Func<TimeSpan, Action, IDisposable> Schedule { get; set; } = static (due, action) => new Timer(_ => action(), null, due, Timeout.InfiniteTimeSpan);
+
+    /// <summary>The window a key goes to, for <see cref="KeyTyped"/>; replaceable in tests.</summary>
+    internal Func<nint> ForegroundWindow { get; set; } = NativeMethods.GetForegroundWindow;
+
+    /// <summary>The character a key types in a window (key, Shift held, window), for <see cref="KeyTyped"/>; replaceable in tests.</summary>
+    internal Func<int, bool, nint, char?> CharacterOf { get; set; } = LayoutCharacter;
 
     public void Start() => _hook.Start();
 
@@ -201,6 +213,17 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
                 return true;
             }
 
+            var ctrl = _down.Contains(HotkeyChord.VkControl);
+            var altOrWin = _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkLWin);
+            if (!isChordKey && Typed(vk, ctrl, altOrWin) is { } typed)
+            {
+                // The key reaches the app and changes what is before its caret. Called on the hook thread, so only the
+                // window and Shift are taken here; the character is looked up and the event raised from the dispatch loop.
+                var window = ForegroundWindow();
+                var shift = _down.Contains(HotkeyChord.VkShift);
+                Raise(() => KeyTyped?.Invoke(window, typed, typed == TypedKey.Character ? CharacterOf(vk, shift, window) : null));
+            }
+
             if (!isChordKey && (_down.Contains(HotkeyChord.VkLWin) || _down.Contains(HotkeyChord.VkControl) || _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkShift)))
             {
                 // A modifier is combined with something else: this is an OS/app shortcut, not our chord.
@@ -256,6 +279,54 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
                 // Swallow everything else so Win+Ctrl+D / Win+Ctrl+Left etc. cannot fire mid-dictation.
                 return true;
         }
+    }
+
+    /// <summary>
+    /// What <paramref name="vk"/> leaves before the caret, or null when the key alone does not tell. Enter, Shift+Enter
+    /// and Ctrl+Enter break the line (a new line, or a message sent); with Alt or Win held, Enter is a shortcut that
+    /// usually leaves the text alone (full screen, properties), and so is any other key with Ctrl, Alt or Win. Space
+    /// leaves a space, Backspace probably a character, and letters, digits and punctuation (Shift allowed) a character.
+    /// Tab usually moves the focus rather than typing; the arrows, Delete, Escape, function keys and modifiers change
+    /// nothing that can be told.
+    /// </summary>
+    private static TypedKey? Typed(int vk, bool ctrl, bool altOrWin)
+    {
+        if (vk == VkReturn)
+        {
+            return altOrWin ? null : TypedKey.LineBreak;
+        }
+
+        if (ctrl || altOrWin)
+        {
+            return null;
+        }
+
+        return vk switch
+        {
+            HotkeyChord.VkSpace => TypedKey.Space,
+            VkBack => TypedKey.Erase,
+            (>= 0x30 and <= 0x39) or (>= 0x41 and <= 0x5A) or (>= 0x60 and <= 0x6F) or (>= 0xBA and <= 0xC0) or (>= 0xDB and <= 0xDF) or 0xE2 => TypedKey.Character,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// The character <paramref name="vk"/> types in <paramref name="window"/>'s keyboard layout (Shift given), or null when
+    /// it types none or more than one, or is a dead key. Flag 4 keeps ToUnicodeEx from changing the keyboard state, so a
+    /// dead key the user is in the middle of typing is not used up here.
+    /// </summary>
+    internal static char? LayoutCharacter(int vk, bool shift, nint window)
+    {
+        var layout = NativeMethods.GetKeyboardLayout(NativeMethods.GetWindowThreadProcessId(window, out _));
+        var state = new byte[256];
+        if (shift)
+        {
+            state[HotkeyChord.VkShift] = 0x80;
+        }
+
+        var chars = new char[4];
+        var scanCode = NativeMethods.MapVirtualKeyExW((uint)vk, 0, layout); // MAPVK_VK_TO_VSC
+        return NativeMethods.ToUnicodeEx((uint)vk, scanCode, state, chars, chars.Length, 4, layout) == 1 ? chars[0] : null;
     }
 
     private bool ChordFullyDown()

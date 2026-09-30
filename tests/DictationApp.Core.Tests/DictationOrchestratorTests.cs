@@ -6,6 +6,7 @@ using DictationApp.Core.Insertion;
 using DictationApp.Core.Session;
 using DictationApp.Core.Settings;
 using DictationApp.Core.Transcription;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
@@ -29,6 +30,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     private readonly InMemoryHistory _history = new();
     private readonly JsonSettingsStore _settings;
     private readonly DictationStatusHub _hub = new();
+    private readonly CapturingLogger<DictationOrchestrator> _log = new();
     private readonly DictationOrchestrator _orchestrator;
 
     public DictationOrchestratorTests()
@@ -51,7 +53,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             _hub,
             new InsertionTextFormatter(_clock),
             new AppPaths(_dir),
-            NullLogger<DictationOrchestrator>.Instance,
+            _log,
             _clock);
     }
 
@@ -647,6 +649,70 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task The_spacing_decision_is_logged_by_kind_and_never_as_text()
+    {
+        await StartAsync();
+        _foreground.TextBeforeCaret = "";      // an empty box
+        await DictateAsync("Secret words.");
+        _foreground.TextBeforeCaret = "ret.";  // text before the caret that ends in a full stop
+        await DictateAsync("More words.");
+        _foreground.TextBeforeCaret = null;    // an unreadable control: the last insertion stands in (it ended in "]")
+        await DictateAsync("Last words.");
+
+        var lines = _log.Messages.Where(m => m.StartsWith("Spacing in ", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(3, lines.Length);
+        Assert.EndsWith("basis=Caret tail=none space=False", lines[0], StringComparison.Ordinal);
+        Assert.EndsWith("basis=Caret tail=U+002E space=True", lines[1], StringComparison.Ordinal);
+        Assert.EndsWith("basis=Memory tail=U+005D space=True", lines[2], StringComparison.Ordinal);
+        Assert.DoesNotContain(lines, l => l.Contains("words", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Keys_pressed_in_the_window_update_what_the_memory_says_is_before_the_caret()
+    {
+        await StartAsync();
+        var window = _foreground.Context.WindowHandle;
+        await DictateAsync("First message.");  // the control cannot be read: remembered, the next text would be joined
+        _hotkey.Type(window, TypedKey.LineBreak); // Enter: the message was sent and the box is empty
+
+        await DictateAsync("second message.");
+        Assert.Equal("Second message. [cleaned]", _inserter.LastText); // no space, and a capital after the line break
+
+        _hotkey.Type(window, TypedKey.LineBreak);
+        _hotkey.Type(window, TypedKey.Character); // a word typed on the new line: the next text is joined to it
+        await DictateAsync("third.");
+        Assert.Equal(" third. [cleaned]", _inserter.LastText);
+
+        _hotkey.Type(window + 1, TypedKey.LineBreak); // a key in another window leaves this one's memory alone
+        await DictateAsync("Fourth.");
+        Assert.Equal(" Fourth. [cleaned]", _inserter.LastText);
+
+        _hotkey.Type(window, TypedKey.Character, '.'); // a full stop typed by hand: the next sentence gets its capital
+        await DictateAsync("fifth.");
+        Assert.Equal(" Fifth. [cleaned]", _inserter.LastText);
+    }
+
+    [Fact]
+    public async Task Text_left_on_the_clipboard_to_paste_by_hand_has_no_joining_space()
+    {
+        await StartAsync();
+        await DictateAsync("First.");          // remembered: the next text is joined with a space
+
+        // The paste could not be confirmed, so the text stays on the clipboard: the user may paste it into an empty box.
+        _inserter.Result = new InsertionResult(InsertionOutcome.Inserted, "Pasted into notepad; also on the clipboard", LeftOnClipboard: true);
+        await DictateAsync("Second.");
+        Assert.Equal(" Second. [cleaned]", _inserter.LastText); // the paste itself keeps its joining space
+        Assert.Equal("Second. [cleaned]", _clipboard.Text);
+
+        // The paste could not be sent at all: the same, and History keeps what was copied.
+        _inserter.Result = new InsertionResult(InsertionOutcome.CopiedOnly, "Could not bring notepad to the front, text copied");
+        await DictateAsync("Third.");
+        Assert.Equal(" Third. [cleaned]", _inserter.LastText);
+        Assert.Equal("Third. [cleaned]", _clipboard.Text);
+        Assert.Equal("Third. [cleaned]", _history.Records[^1].InsertedText);
+    }
+
+    [Fact]
     public async Task A_paste_that_could_not_be_confirmed_leaves_the_text_on_the_clipboard_too()
     {
         _inserter.Result = new InsertionResult(InsertionOutcome.Inserted, "Pasted into notepad; also on the clipboard", LeftOnClipboard: true);
@@ -1105,6 +1171,8 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public event Action<ArrowDirection>? ArrowPressed;
 
+        public event Action<nint, TypedKey, char?>? KeyTyped;
+
         public bool IsChordHeld { get; private set; }
 
         public bool Enabled { get; set; } = true;
@@ -1128,6 +1196,8 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         public void Escape() => EscapePressed?.Invoke();
 
         public void Arrow(ArrowDirection d) => ArrowPressed?.Invoke(d);
+
+        public void Type(nint window, TypedKey key, char? character = null) => KeyTyped?.Invoke(window, key, character);
     }
 
     private sealed class FakeCapture : IAudioCapture
@@ -1346,6 +1416,21 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             _connect = new TaskCompletionSource<BeginMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly ConcurrentQueue<string> _messages = new();
+
+        public IReadOnlyCollection<string> Messages => _messages;
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            _messages.Enqueue(formatter(state, exception));
     }
 
     private sealed class FakeTranscriberFactory(FakeTranscriber transcriber) : IStreamingTranscriberFactory

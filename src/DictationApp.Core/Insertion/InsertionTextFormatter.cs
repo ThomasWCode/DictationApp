@@ -1,5 +1,39 @@
 namespace DictationApp.Core.Insertion;
 
+/// <summary>Where the character before an insertion was learned from.</summary>
+public enum SpacingBasis
+{
+    /// <summary>Neither the control nor the memory said anything: as far as we know nothing precedes the insertion.</summary>
+    Unknown,
+
+    /// <summary>Read from the control; an empty field reads as "".</summary>
+    Caret,
+
+    /// <summary>The control could not be read, so the last insertion into the window stood in.</summary>
+    Memory,
+}
+
+/// <summary>What a key the user pressed leaves before the caret, as far as the key alone tells (see <see cref="InsertionTextFormatter.Typed"/>).</summary>
+public enum TypedKey
+{
+    /// <summary>A character that shows: a letter, digit or punctuation mark.</summary>
+    Character,
+
+    /// <summary>Backspace: it removed a character, and one usually still shows before the caret.</summary>
+    Erase,
+
+    /// <summary>Space.</summary>
+    Space,
+
+    /// <summary>Enter, Shift+Enter or Ctrl+Enter: a new line, or a message sent and its box emptied.</summary>
+    LineBreak,
+}
+
+/// <param name="Text">The text to insert, with its joining space and capital.</param>
+/// <param name="Basis">Where the character before the insertion came from.</param>
+/// <param name="Tail">That character, or null when there is none (the start of a field).</param>
+public readonly record struct FormattedInsertion(string Text, SpacingBasis Basis, string? Tail);
+
 /// <summary>
 /// Decides the joining whitespace and capitalisation before an insertion. The text before the caret, read from
 /// the control, decides when it is known: an empty chat box after a message was sent gets no leading space.
@@ -8,6 +42,12 @@ namespace DictationApp.Core.Insertion;
 /// </summary>
 public sealed class InsertionTextFormatter
 {
+    /// <summary>
+    /// Stands in for a character that shows but is not known (one Backspace left, or a key whose character the layout did
+    /// not say): a dictation after it is joined with a space.
+    /// </summary>
+    private const string TypedCharacter = "a";
+
     private readonly Dictionary<nint, (string Tail, DateTimeOffset At)> _lastByWindow = [];
     private readonly TimeProvider _time;
     private readonly object _lock = new();
@@ -22,33 +62,69 @@ public sealed class InsertionTextFormatter
 
     /// <param name="textBeforeCaret">The control's text just before the caret ("" at the start of a field), or null
     /// when it could not be read.</param>
-    public string Format(string text, nint windowHandle, string? textBeforeCaret = null)
+    public string Format(string text, nint windowHandle, string? textBeforeCaret = null) =>
+        FormatDetailed(text, windowHandle, textBeforeCaret).Text;
+
+    /// <summary><see cref="Format"/>, and where the character before the insertion came from, so the decision can be logged.</summary>
+    public FormattedInsertion FormatDetailed(string text, nint windowHandle, string? textBeforeCaret = null)
     {
         if (string.IsNullOrEmpty(text))
         {
-            return string.Empty;
+            return new FormattedInsertion(string.Empty, SpacingBasis.Unknown, null);
         }
 
         lock (_lock)
         {
             var now = _time.GetUtcNow();
             string? tail = null;
+            var basis = SpacingBasis.Unknown;
             if (textBeforeCaret is not null)
             {
                 tail = VisibleTail(textBeforeCaret);
+                basis = SpacingBasis.Caret;
             }
             else if (_lastByWindow.TryGetValue(windowHandle, out var last) && now - last.At <= Memory)
             {
                 tail = last.Tail;
+                basis = SpacingBasis.Memory;
             }
 
             var result = Apply(text, tail);
             _lastByWindow[windowHandle] = (result.Length > 0 ? result[^1].ToString() : string.Empty, now);
-            return result;
+            return new FormattedInsertion(result, basis, tail);
         }
     }
 
-    /// <summary>Forget what was inserted into <paramref name="windowHandle"/> (e.g. the user typed in between).</summary>
+    /// <summary>
+    /// The user pressed <paramref name="key"/> in <paramref name="windowHandle"/> after something was inserted there: the
+    /// memory now holds what that key left before the caret (a line break after Enter, a space, a character) instead of
+    /// the end of the insertion, so a message sent with Enter is not followed by a space and a word typed in between
+    /// still is. A typed <paramref name="character"/> is kept as itself, so a full stop typed by hand still capitalises
+    /// the next sentence and an opening bracket takes no space after it. A window with nothing remembered is left alone:
+    /// the memory only joins dictations in controls whose caret cannot be read.
+    /// </summary>
+    public void Typed(nint windowHandle, TypedKey key, char? character = null)
+    {
+        lock (_lock)
+        {
+            var now = _time.GetUtcNow();
+            if (!_lastByWindow.TryGetValue(windowHandle, out var last) || now - last.At > Memory)
+            {
+                return;
+            }
+
+            var tail = key switch
+            {
+                TypedKey.LineBreak => "\n",
+                TypedKey.Space => " ",
+                TypedKey.Character when character is { } typed => typed.ToString(),
+                _ => TypedCharacter,
+            };
+            _lastByWindow[windowHandle] = (tail, now);
+        }
+    }
+
+    /// <summary>Forget what was inserted into <paramref name="windowHandle"/> (the text did not arrive there).</summary>
     public void Reset(nint windowHandle)
     {
         lock (_lock)

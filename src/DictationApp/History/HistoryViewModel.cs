@@ -120,7 +120,7 @@ public sealed partial class HistoryViewModel : ObservableObject
             return;
         }
 
-        await _clipboard.SetTextAsync(Selected.InsertedText.Length > 0 ? Selected.InsertedText : Selected.RawTranscript);
+        await _clipboard.SetTextAsync(Selected.CopyText);
         Status = "Copied to clipboard.";
     }
 
