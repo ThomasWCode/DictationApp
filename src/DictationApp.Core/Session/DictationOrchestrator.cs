@@ -1514,7 +1514,7 @@ public sealed class DictationOrchestrator : BackgroundService
     /// Without this, a chat box whose caret cannot be read got a leading space after a message was sent with Enter,
     /// because the memory still ended with the sent message's full stop.
     /// </summary>
-    private void OnKeyTyped(nint window, TypedKey key) => _formatter.Typed(window, key);
+    private void OnKeyTyped(nint window, TypedKey key, char? character) => _formatter.Typed(window, key, character);
 
     private void OnToneOverride(Tone tone) => _events.Writer.TryWrite(new ControlEvent(ControlKind.ToneOverride, Tone: tone));
 

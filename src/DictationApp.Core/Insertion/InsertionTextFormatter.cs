@@ -42,7 +42,10 @@ public readonly record struct FormattedInsertion(string Text, SpacingBasis Basis
 /// </summary>
 public sealed class InsertionTextFormatter
 {
-    /// <summary>Stands in for a character the user typed, or one Backspace left: it shows, so a dictation is joined with a space.</summary>
+    /// <summary>
+    /// Stands in for a character that shows but is not known (one Backspace left, or a key whose character the layout did
+    /// not say): a dictation after it is joined with a space.
+    /// </summary>
     private const string TypedCharacter = "a";
 
     private readonly Dictionary<nint, (string Tail, DateTimeOffset At)> _lastByWindow = [];
@@ -96,10 +99,11 @@ public sealed class InsertionTextFormatter
     /// The user pressed <paramref name="key"/> in <paramref name="windowHandle"/> after something was inserted there: the
     /// memory now holds what that key left before the caret (a line break after Enter, a space, a character) instead of
     /// the end of the insertion, so a message sent with Enter is not followed by a space and a word typed in between
-    /// still is. A window with nothing remembered is left alone: the memory only joins dictations in controls whose caret
-    /// cannot be read.
+    /// still is. A typed <paramref name="character"/> is kept as itself, so a full stop typed by hand still capitalises
+    /// the next sentence and an opening bracket takes no space after it. A window with nothing remembered is left alone:
+    /// the memory only joins dictations in controls whose caret cannot be read.
     /// </summary>
-    public void Typed(nint windowHandle, TypedKey key)
+    public void Typed(nint windowHandle, TypedKey key, char? character = null)
     {
         lock (_lock)
         {
@@ -113,6 +117,7 @@ public sealed class InsertionTextFormatter
             {
                 TypedKey.LineBreak => "\n",
                 TypedKey.Space => " ",
+                TypedKey.Character when character is { } typed => typed.ToString(),
                 _ => TypedCharacter,
             };
             _lastByWindow[windowHandle] = (tail, now);

@@ -186,11 +186,11 @@ public sealed class FocusedEditableDetector : IDisposable
 
     /// <summary>
     /// In a Chromium editor: "" (the start of the field) or a line break (the start of a line) when the caret is on a line
-    /// with nothing on it, else null (read the text as usual). Three signs, in order: the classes an editor puts on an
-    /// empty box or block (see <see cref="EmptyFieldMarkers"/>); a caret line with no text on it, which covers editors
-    /// without such classes (a placeholder drawn by CSS is not part of the line); a block holding only ProseMirror's
-    /// trailing-break marker, for a placeholder element that is part of the line. A failed check leaves the ordinary read
-    /// alone rather than losing it.
+    /// with nothing on it, else null (read the text as usual). Two signs, in order: the classes an editor puts on an empty
+    /// box or block (see <see cref="EmptyFieldMarkers"/>), and a caret line with no text on it, which covers editors
+    /// without such classes (a placeholder drawn by CSS is not part of the line). A placeholder that is an element on the
+    /// line, in an editor without such classes, cannot be told from real content there (a mention at the end of a
+    /// paragraph looks the same), so it reads as text. A failed check leaves the ordinary read alone rather than losing it.
     /// </summary>
     private static string? EmptyLineText(AutomationElement focused, ITextPattern pattern, ITextRange caret)
     {
@@ -213,11 +213,7 @@ public sealed class FocusedEditableDetector : IDisposable
                 return line.CompareEndpoints(TextPatternRangeEndpoint.Start, pattern.DocumentRange, TextPatternRangeEndpoint.Start) <= 0 ? string.Empty : "\n";
             }
 
-            return block is not null
-                && block.Properties.ControlType.ValueOrDefault == ControlType.Group
-                && block.FindFirstChild(f => f.ByClassName(EmptyFieldMarkers.TrailingBreakClass)) is not null
-                    ? "\n"
-                    : null;
+            return null;
         }
         catch (Exception)
         {

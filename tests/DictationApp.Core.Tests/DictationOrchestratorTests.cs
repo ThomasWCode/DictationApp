@@ -686,6 +686,10 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         _hotkey.Type(window + 1, TypedKey.LineBreak); // a key in another window leaves this one's memory alone
         await DictateAsync("Fourth.");
         Assert.Equal(" Fourth. [cleaned]", _inserter.LastText);
+
+        _hotkey.Type(window, TypedKey.Character, '.'); // a full stop typed by hand: the next sentence gets its capital
+        await DictateAsync("fifth.");
+        Assert.Equal(" Fifth. [cleaned]", _inserter.LastText);
     }
 
     [Fact]
@@ -1167,7 +1171,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public event Action<ArrowDirection>? ArrowPressed;
 
-        public event Action<nint, TypedKey>? KeyTyped;
+        public event Action<nint, TypedKey, char?>? KeyTyped;
 
         public bool IsChordHeld { get; private set; }
 
@@ -1193,7 +1197,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
 
         public void Arrow(ArrowDirection d) => ArrowPressed?.Invoke(d);
 
-        public void Type(nint window, TypedKey key) => KeyTyped?.Invoke(window, key);
+        public void Type(nint window, TypedKey key, char? character = null) => KeyTyped?.Invoke(window, key, character);
     }
 
     private sealed class FakeCapture : IAudioCapture

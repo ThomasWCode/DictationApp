@@ -85,7 +85,7 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     public event Action<ArrowDirection>? ArrowPressed;
 
-    public event Action<nint, TypedKey>? KeyTyped;
+    public event Action<nint, TypedKey, char?>? KeyTyped;
 
     /// <summary>Raised instead of ChordDown/ChordUp while <see cref="ObserveOnly"/> is set: true on press, false on release.</summary>
     public event Action<bool>? ChordObserved;
@@ -128,6 +128,9 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
 
     /// <summary>The window a key goes to, for <see cref="KeyTyped"/>; replaceable in tests.</summary>
     internal Func<nint> ForegroundWindow { get; set; } = NativeMethods.GetForegroundWindow;
+
+    /// <summary>The character a key types in a window (key, Shift held, window), for <see cref="KeyTyped"/>; replaceable in tests.</summary>
+    internal Func<int, bool, nint, char?> CharacterOf { get; set; } = LayoutCharacter;
 
     public void Start() => _hook.Start();
 
@@ -215,9 +218,10 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
             if (!isChordKey && Typed(vk, shortcut) is { } typed)
             {
                 // The key reaches the app and changes what is before its caret. Called on the hook thread, so only the
-                // window is looked up here; the event itself is raised from the dispatch loop.
+                // window and Shift are taken here; the character is looked up and the event raised from the dispatch loop.
                 var window = ForegroundWindow();
-                Raise(() => KeyTyped?.Invoke(window, typed));
+                var shift = _down.Contains(HotkeyChord.VkShift);
+                Raise(() => KeyTyped?.Invoke(window, typed, typed == TypedKey.Character ? CharacterOf(vk, shift, window) : null));
             }
 
             if (!isChordKey && (_down.Contains(HotkeyChord.VkLWin) || _down.Contains(HotkeyChord.VkControl) || _down.Contains(HotkeyChord.VkAlt) || _down.Contains(HotkeyChord.VkShift)))
@@ -302,6 +306,25 @@ public sealed class HotkeyService : IHotkeyService, IDisposable
             (>= 0x30 and <= 0x39) or (>= 0x41 and <= 0x5A) or (>= 0x60 and <= 0x6F) or (>= 0xBA and <= 0xC0) or (>= 0xDB and <= 0xDF) or 0xE2 => TypedKey.Character,
             _ => null,
         };
+    }
+
+    /// <summary>
+    /// The character <paramref name="vk"/> types in <paramref name="window"/>'s keyboard layout (Shift given), or null when
+    /// it types none or more than one, or is a dead key. Flag 4 keeps ToUnicodeEx from changing the keyboard state, so a
+    /// dead key the user is in the middle of typing is not used up here.
+    /// </summary>
+    internal static char? LayoutCharacter(int vk, bool shift, nint window)
+    {
+        var layout = NativeMethods.GetKeyboardLayout(NativeMethods.GetWindowThreadProcessId(window, out _));
+        var state = new byte[256];
+        if (shift)
+        {
+            state[HotkeyChord.VkShift] = 0x80;
+        }
+
+        var chars = new char[4];
+        var scanCode = NativeMethods.MapVirtualKeyExW((uint)vk, 0, layout); // MAPVK_VK_TO_VSC
+        return NativeMethods.ToUnicodeEx((uint)vk, scanCode, state, chars, chars.Length, 4, layout) == 1 ? chars[0] : null;
     }
 
     private bool ChordFullyDown()
