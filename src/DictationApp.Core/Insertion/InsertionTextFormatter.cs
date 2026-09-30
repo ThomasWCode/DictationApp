@@ -1,5 +1,23 @@
 namespace DictationApp.Core.Insertion;
 
+/// <summary>Where the character before an insertion was learned from.</summary>
+public enum SpacingBasis
+{
+    /// <summary>Neither the control nor the memory said anything: as far as we know nothing precedes the insertion.</summary>
+    Unknown,
+
+    /// <summary>Read from the control; an empty field reads as "".</summary>
+    Caret,
+
+    /// <summary>The control could not be read, so the last insertion into the window stood in.</summary>
+    Memory,
+}
+
+/// <param name="Text">The text to insert, with its joining space and capital.</param>
+/// <param name="Basis">Where the character before the insertion came from.</param>
+/// <param name="Tail">That character, or null when there is none (the start of a field).</param>
+public readonly record struct FormattedInsertion(string Text, SpacingBasis Basis, string? Tail);
+
 /// <summary>
 /// Decides the joining whitespace and capitalisation before an insertion. The text before the caret, read from
 /// the control, decides when it is known: an empty chat box after a message was sent gets no leading space.
@@ -22,29 +40,36 @@ public sealed class InsertionTextFormatter
 
     /// <param name="textBeforeCaret">The control's text just before the caret ("" at the start of a field), or null
     /// when it could not be read.</param>
-    public string Format(string text, nint windowHandle, string? textBeforeCaret = null)
+    public string Format(string text, nint windowHandle, string? textBeforeCaret = null) =>
+        FormatDetailed(text, windowHandle, textBeforeCaret).Text;
+
+    /// <summary><see cref="Format"/>, and where the character before the insertion came from, so the decision can be logged.</summary>
+    public FormattedInsertion FormatDetailed(string text, nint windowHandle, string? textBeforeCaret = null)
     {
         if (string.IsNullOrEmpty(text))
         {
-            return string.Empty;
+            return new FormattedInsertion(string.Empty, SpacingBasis.Unknown, null);
         }
 
         lock (_lock)
         {
             var now = _time.GetUtcNow();
             string? tail = null;
+            var basis = SpacingBasis.Unknown;
             if (textBeforeCaret is not null)
             {
                 tail = VisibleTail(textBeforeCaret);
+                basis = SpacingBasis.Caret;
             }
             else if (_lastByWindow.TryGetValue(windowHandle, out var last) && now - last.At <= Memory)
             {
                 tail = last.Tail;
+                basis = SpacingBasis.Memory;
             }
 
             var result = Apply(text, tail);
             _lastByWindow[windowHandle] = (result.Length > 0 ? result[^1].ToString() : string.Empty, now);
-            return result;
+            return new FormattedInsertion(result, basis, tail);
         }
     }
 

@@ -6,6 +6,7 @@ using DictationApp.Core.Insertion;
 using DictationApp.Core.Session;
 using DictationApp.Core.Settings;
 using DictationApp.Core.Transcription;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 
@@ -29,6 +30,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
     private readonly InMemoryHistory _history = new();
     private readonly JsonSettingsStore _settings;
     private readonly DictationStatusHub _hub = new();
+    private readonly CapturingLogger<DictationOrchestrator> _log = new();
     private readonly DictationOrchestrator _orchestrator;
 
     public DictationOrchestratorTests()
@@ -51,7 +53,7 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             _hub,
             new InsertionTextFormatter(_clock),
             new AppPaths(_dir),
-            NullLogger<DictationOrchestrator>.Instance,
+            _log,
             _clock);
     }
 
@@ -644,6 +646,25 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
         _foreground.TextBeforeCaret = null;
         await DictateAsync("Third.");
         Assert.StartsWith(" Third.", _inserter.LastText);
+    }
+
+    [Fact]
+    public async Task The_spacing_decision_is_logged_by_kind_and_never_as_text()
+    {
+        await StartAsync();
+        _foreground.TextBeforeCaret = "";      // an empty box
+        await DictateAsync("Secret words.");
+        _foreground.TextBeforeCaret = "ret.";  // text before the caret that ends in a full stop
+        await DictateAsync("More words.");
+        _foreground.TextBeforeCaret = null;    // an unreadable control: the last insertion stands in (it ended in "]")
+        await DictateAsync("Last words.");
+
+        var lines = _log.Messages.Where(m => m.StartsWith("Spacing in ", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(3, lines.Length);
+        Assert.EndsWith("basis=Caret tail=none space=False", lines[0], StringComparison.Ordinal);
+        Assert.EndsWith("basis=Caret tail=U+002E space=True", lines[1], StringComparison.Ordinal);
+        Assert.EndsWith("basis=Memory tail=U+005D space=True", lines[2], StringComparison.Ordinal);
+        Assert.DoesNotContain(lines, l => l.Contains("words", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -1346,6 +1367,21 @@ public sealed class DictationOrchestratorTests : IAsyncDisposable
             _connect = new TaskCompletionSource<BeginMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class CapturingLogger<T> : ILogger<T>
+    {
+        private readonly ConcurrentQueue<string> _messages = new();
+
+        public IReadOnlyCollection<string> Messages => _messages;
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+            _messages.Enqueue(formatter(state, exception));
     }
 
     private sealed class FakeTranscriberFactory(FakeTranscriber transcriber) : IStreamingTranscriberFactory
