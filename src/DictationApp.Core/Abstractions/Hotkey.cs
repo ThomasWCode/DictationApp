@@ -40,6 +40,13 @@ public interface IHotkeyService
 
     event Action<ArrowDirection>? ArrowPressed;
 
+    /// <summary>
+    /// A key that reaches the app went down in the window given (the foreground window): not a modifier, not the chord,
+    /// not a key swallowed while the chord is held, not injected. What is before the caret there may have changed (a
+    /// message sent with Enter, a word typed, the caret moved), so the memory of the last insertion no longer says.
+    /// </summary>
+    event Action<nint>? KeyTyped;
+
     bool IsChordHeld { get; }
 
     /// <summary>When false the hook keeps running but no events are raised (tray "Pause hotkey").</summary>
